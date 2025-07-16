@@ -1,0 +1,2035 @@
+---
+title: "SES and Microbiome code (Replication on COPSAC cohort)"
+author: "Darlene Dai"
+date: "2025-07-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Dempgraphic table of COPSAC cohort
+```{r, echo=T, warning=FALSE, message=FALSE}
+rm(list=ls())
+library(lavaan)
+library(psych)
+library(circlize)
+library(semTools)
+library(colorspace)
+library(ggplot2)
+library(tibble)
+library(limma)
+library(tidyverse)
+library(patchwork)
+library(phyloseq)
+library(corrplot)
+library(car)
+library(magrittr)
+library(ggcorrplot)
+library(missForest)
+library(xlsx)
+library(ggpubr)
+library(metaMint)
+library(lubridate)
+library(plyr)
+library(stringr)
+library(dplyr)
+library(cowplot)
+library(ggrepel)
+library(ecodist)
+library(reshape2)
+library(WGCNA)
+library(Maaslin2)
+library(copiome)
+library(ggforce)
+library(gtsummary)
+library(scales)
+library(ggsci)
+library(binom)
+load("/Users/darlene.dai/Desktop/Darlene Dai/Data/COPSAC Data/Data/Clinical data with SES Index_20250711.RData")
+source("/Users/darlene.dai/Desktop/Darlene Dai/Common function/UVA&MVA function.R")
+source("/Users/darlene.dai/Desktop/Darlene Dai/Common function/Demographic Function.R")
+source("/Users/darlene.dai/Desktop/SES/Script/P4 SEM update model.R")
+work.dir <- "/Users/darlene.dai/Desktop/SES/Results/manuscript/Code/Replication in COPSAC/Upload code"
+setwd(work.dir)
+###########################################################################################
+#demographic table
+used.vars <- c("asthma5y_ep","atopy5y","overweight","Tscore_abnormal",
+                "bf_duration_imp","EBF_4m",
+               "meducationhighest_pre18w","deducationhighest_pre18w","income_pre", "male")
+used.vars.demo <- used.vars
+
+data.map <- rbind(data.map, data.frame(Vars="EBF_4m", Category="Postnatal",Label="Exclusive breastfeeding (4m)",Type="Categorical"))
+cate.vars.all <- data.map$Vars[data.map$Type=="Categorical"]
+cont.vars.all <- data.map$Vars[data.map$Type=="Continuous"]
+map.labels <- c(as.character(data.map$Label))
+names(map.labels) <- c(as.character(data.map$Vars))
+demo.tab1 <- demo.fuc(data.demo = data.withmissing,
+                      cate.vars = used.vars.demo[used.vars.demo%in%cate.vars.all],
+                      cont.vars = c("MR1_latent.raw",used.vars.demo[used.vars.demo%in%cont.vars.all]),
+                      subg.var = NA,
+                      comp.p=F,
+                      dic.demo = map.labels,
+                      na.option = "Exclude",
+                      dic.level = NA)
+demo.tab1.na <- demo.fuc(data.demo = data.withmissing,
+                         cate.vars = used.vars.demo[used.vars.demo%in%cate.vars.all],
+                         cont.vars = c("MR1_latent.raw",used.vars.demo[used.vars.demo%in%cont.vars.all]),
+                         subg.var = NA,
+                         comp.p=F,
+                         dic.demo = map.labels,
+                         na.option = "Include",
+                         dic.level = NA)
+demo.tab1.na <- subset(demo.tab1.na, Variable=="Unknown")
+demo.tab1 <- rbind(demo.tab1, demo.tab1.na)
+demo.tab1 <- demo.tab1[order(demo.tab1$Map),]
+demo.tab1 <- merge(demo.tab1, data.map, by.x="Map", by.y="Vars",all.x=T,sort = F)
+demo.tab1 <- demo.tab1[,c("Category","Variable","Cohort","Map")]
+
+demo.tab1.use <- demo.tab1
+
+demo.tab1.use$Category[is.na(demo.tab1.use$Category)] <- "no.patient"
+demo.tab1.use$Category <- factor(demo.tab1.use$Category, levels=c("no.patient","SES","Ethnicity","Health",
+                                                                  "Birth", "Pregnancy",  "Postnatal" ,
+                                                                  "Home Environment"  , "Neighbourhood Environment","Parental Diet/Health" ),
+                                 ordered=T)
+demo.tab1.use <- subset(demo.tab1.use, !Category%in%c("Ethnicity"))
+write.csv(demo.tab1.use, "Demographic table.csv")
+demo.tab1.use <- demo.tab1.use[order(demo.tab1.use$Category),c("Variable","Cohort")]
+demo.tab1.use
+```
+
+
+## Explore association across SES index, breastfeeding and chlidhood health outcomes
+```{r, echo=T, message=F, warning=F}
+#Extract response variables and covariates
+outcome.vars <- data.map$Vars[data.map$Category=="Health"]
+outcome.vars <- outcome.vars
+cov.vars <- c("bf_duration_imp","EBF_4m")
+
+ses.vars <-  c("MR1_latent.raw", "deducationhighest_pre18w_num" ,"meducationhighest_pre18w_num", "income_pre_num")
+cate.vars.all <- unique(c(data.map$Vars[data.map$Type=="Categorical"],"vaginal","cwol","autumn","summer","winter","causacian"))
+cont.vars.all <- unique(data.map$Vars[data.map$Type=="Continuous"])
+
+res.var.uses <- c("atopy5y", "asthma5y_ep", "overweight","Tscore_abnormal")
+
+#Generate phenotype with at least one of these SES-associated health risks
+data.resp.sum <- data.withmissing[,c("asthma5y_ep", "overweight","Tscore_abnormal")]
+for(i in 1:ncol(data.resp.sum)){data.resp.sum[,i] <- as.numeric(as.character(data.resp.sum[,i]))}
+nomissing.sum <- apply(data.resp.sum,1,sum)
+missing.sum <- apply(data.resp.sum,1,function(x)sum(x, na.rm=T))
+data.withmissing$phenotype_atleast1 <- ifelse(missing.sum>=1,1, ifelse(nomissing.sum==0,0, NA))
+
+#Univariable analysis with clinical and environmental factors
+UVA.res.outcome <- NULL
+data.use <- data.withmissing
+cov.vars.use <- c(cov.vars)
+ses.vars.use <- c("MR1_latent.raw.interquartile",
+                 "deducationhighest_pre18w_num" ,"meducationhighest_pre18w_num",
+                  "income_pre_num")
+
+#Scale the data to get standardized coefficient
+data.fa.scale <- data.use[,c(cov.vars.use,ses.vars.use)[c(cov.vars.use,ses.vars.use)%in%cont.vars.all]]
+for(i in 1:ncol(data.fa.scale)){
+  data.fa.scale[,i] <- as.numeric(as.character(data.fa.scale[,i]))
+}
+data.fa.scale <- scale(data.fa.scale)
+data.fa.scale <- cbind(data.use[,c("subjectnumber","male","caucasian",
+                                   c(cov.vars.use,ses.vars.use)[!c(cov.vars.use,ses.vars.use)%in%cont.vars.all])],
+                       data.fa.scale)
+
+for(cov.var.use in cov.vars.use){
+  #Set up which model to use, for continous response, use lm, for categorical response, use glm
+  if(cov.var.use %in% cont.vars.all){
+    func.use <- "lm"
+  }else{
+    func.use <- "glm"
+  }
+  #Not adjust for genetic PCs
+  for(adj.genetic in c(F)){
+    uva.res.mr1 <- NULL
+    for(ses.var.use in ses.vars.use){
+      if(adj.genetic==F){
+        uva.res.mr1.each <- UVAMVA.func(subset(data.fa.scale),
+                                        res.va=cov.var.use,digit.use=4,
+                                        conf.vars.func=unique(c(ses.var.use,"male")),
+                                        func.type=func.use, strata=NULL,
+                                        ana.type="MVA", ci=T, save.model=F, na.uva="Each",scale="log")
+      }
+      
+      uva.res.mr1.each <- uva.res.mr1.each[!rownames(uva.res.mr1.each)%in%c("(Intercept)","male",
+                                                                            "caucasian"),]
+      uva.res.mr1.each$SESVar <- ses.var.use
+      uva.res.mr1 <- rbind(uva.res.mr1, uva.res.mr1.each)
+    }
+    colnames(uva.res.mr1) <- gsub("MVA","UVA",colnames(uva.res.mr1))
+    colnames(uva.res.mr1)[colnames(uva.res.mr1)=="M"] <- "U"
+    uva.res.mr1$Response <- cov.var.use
+    uva.res.mr1$Adj.genetic <- adj.genetic
+    UVA.res.outcome <- rbind(UVA.res.outcome, uva.res.mr1)
+  }
+}
+
+###########################################
+UVA.res.outcome.cont <- NULL
+data.use <- data.withmissing
+cov.vars.use <- c(cov.vars)
+ses.vars.use <- c("MR1_latent.raw.interquartile",
+                   "deducationhighest_pre18w_num" ,"meducationhighest_pre18w_num",
+                  "income_pre_num")
+
+#Scale the data to get standardized coefficient
+
+data.fa.scale <- data.use[,c(cov.vars.use,ses.vars.use)]
+for(i in 1:ncol(data.fa.scale)){
+  data.fa.scale[,i] <- as.numeric(as.character(data.fa.scale[,i]))
+}
+data.fa.scale <- scale(data.fa.scale)
+data.fa.scale <- cbind(data.use[,c("subjectnumber","male","caucasian")],
+                       data.fa.scale)
+
+#Univariable analysis + Sensitivity analysis for each site / adjust genetic score
+
+for(cov.var.use in cov.vars.use){
+    func.use <- "lm"
+    #Not adjust for genetic PCs
+    for(adj.genetic in c(F)){
+      uva.res.mr1 <- NULL
+      for(ses.var.use in ses.vars.use){
+          if(adj.genetic==F){
+            uva.res.mr1.each <- UVAMVA.func(subset(data.fa.scale),
+                                            res.va=ses.var.use,digit.use=4,
+                                            conf.vars.func=unique(c(cov.var.use,"male")),
+                                            func.type=func.use, strata=NULL,
+                                            ana.type="MVA", ci=T, save.model=F, na.uva="Each",scale="log")
+          }
+
+        uva.res.mr1.each <- uva.res.mr1.each[!rownames(uva.res.mr1.each)%in%c("(Intercept)","male","caucasian"),]
+        uva.res.mr1.each$SESVar <- ses.var.use
+        uva.res.mr1 <- rbind(uva.res.mr1, uva.res.mr1.each)
+      }
+      colnames(uva.res.mr1) <- gsub("MVA","UVA",colnames(uva.res.mr1))
+      colnames(uva.res.mr1)[colnames(uva.res.mr1)=="M"] <- "U"
+      uva.res.mr1$Response <- cov.var.use
+      uva.res.mr1$Adj.genetic <- adj.genetic
+      UVA.res.outcome.cont <- rbind(UVA.res.outcome.cont, uva.res.mr1)
+    }
+  }
+
+
+Response.outcome <- NULL
+for(res.var.use in c("phenotype_atleast1",res.var.uses)){
+  used.vars <- c("MR1_latent.raw.interquartile","SES_EBFcompound4m",c(cov.vars))
+  data.fa.scale <- data.withmissing[,c(cov.vars[cov.vars%in%cont.vars.all]),drop=F]
+  for(i in 1:ncol(data.fa.scale)){
+    data.fa.scale[,i] <- as.numeric(as.character(data.fa.scale[,i]))
+  }
+  data.fa.scale <- scale(data.fa.scale)
+  data.fa.scale <- cbind(data.withmissing[,c("subjectnumber", "male","caucasian",
+                                             res.var.use,used.vars[!used.vars%in%colnames(data.fa.scale)])], data.fa.scale)
+  data.use <- data.fa.scale
+
+  for(used.var in used.vars){
+    uva.res <- UVAMVA.func(data.func=data.use,
+                           res.var=res.var.use,digit.use=4,
+                           conf.vars.func=c(used.var,"male"),
+                           func.type="glm", strata=NULL,
+                           ana.type="MVA", ci=T, save.model=F, na.uva="Each",scale="log")
+    uva.res$Response <- res.var.use
+    uva.res$Cohort <- "all"
+    uva.res$Cov <- used.var
+    Response.outcome <- rbind(Response.outcome,uva.res)
+  }
+}
+```
+
+
+### Generate SES index vs. BF
+```{r, echo=T,out.width="160%", message=F, warning=F}
+data.map.use <- data.map
+UVA.res.all <- subset(UVA.res.outcome.cont, !Variables%in%c("sitetoronto","male1","sitevancouver","sitewinnipeg"))
+uva.res.ses.plot <- merge(subset(UVA.res.all,Response%in%used.vars),
+                          data.map.use[data.map.use$Vars%in%used.vars,], by.x="Response", by.y="Vars",all.x=T)
+
+uva.res.ses.plot$ci_low <- as.numeric(gsub("\\(","",strsplit2(uva.res.ses.plot$UVA_CI,",")[,1]))
+uva.res.ses.plot$ci_high <- as.numeric(gsub("\\)","",strsplit2(uva.res.ses.plot$UVA_CI,",")[,2]))
+uva.res.ses.plot$sig <- ifelse(uva.res.ses.plot$UVA_P<0.05,"sig","nosig")
+uva.res.ses.plot$Direction <- ifelse(uva.res.ses.plot$UVA>0,"Positive","Negative")
+uva.res.ses.plot$Category <- factor(uva.res.ses.plot$Category, levels=c("SES","Pregnancy",
+                                                                        "Birth",
+                                                                        "Postnatal",
+                                                                        "Home Environment",
+                                                                        "Neighbourhood Environment",
+                                                                        "Parental Diet/Health",
+                                                                        "Breastfeeding history",
+                                                                        "Breastmilk vitamin"),
+                                    ordered=T)
+color.sh <- data.frame(Category=c("Postnatal" ),
+                       color.use=c("#BF5B17"))
+uva.res.ses.plot$Cohort <- "COPSAC"
+ses.plot <- ggplot(unique(subset(uva.res.ses.plot, SESVar%in%"MR1_latent.raw.interquartile" & Cohort=="COPSAC" & Adj.genetic==F)),
+       aes(y=UVA, x=reorder(Label,UVA,decreasing=T),fill = Category)) + 
+  theme_bw() + 
+  ylab("Standardized coefficient") +
+  geom_errorbar(aes(ymin=ci_low,ymax=ci_high), width=.2, position=position_dodge(0.5)) +
+  geom_point(position=position_dodge(0.5), size = 3, pch = 21,col="black") +
+  facet_grid(~Category,scale="free",space="free",labeller = label_wrap_gen(width=8)) +
+  xlab("") + ggtitle("") +
+  scale_shape_manual(values=seq(0,10)) +
+  scale_color_manual(values = c('gray', 'black'))+
+  geom_hline(yintercept = 0) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+ 
+  scale_fill_manual(values=c( "#BF5B17"))
+
+plot(ses.plot)
+```
+
+
+### Generate SES index vs. phenotype (Fig 4b)
+```{r, echo=T,out.width="120%", warning=F, message=F}
+response.plot <- subset(Response.outcome, Variables=="MR1_latent.raw.interquartile" & Cohort=="all")
+
+response.plot$ci_low <- round(exp(as.numeric(gsub("\\(","",strsplit2(response.plot$MVA_CI,",")[,1]))),2)
+response.plot$ci_high <- round(exp(as.numeric(gsub("\\)","",strsplit2(response.plot$MVA_CI,",")[,2]))),2)
+response.plot$MVA <- round(exp(response.plot$MVA),2)
+response.plot$sig <- ifelse(response.plot$MVA_P<0.05,"sig","nosig")
+response.plot$Direction <- ifelse(response.plot$MVA>0,"Positive","Negative")
+
+response.plot <- subset(response.plot, Response%in%c("atopy5y","asthma5y_ep","overweight","Tscore_abnormal"))
+response.plot$Response[response.plot$Response=="asthma5y_ep"] <- "Asthma"
+response.plot$Response[response.plot$Response=="atopy5y"] <- "Atopy"
+
+response.plot$Response[response.plot$Response=="overweight"] <- "Overweight/obese"
+response.plot$Response[response.plot$Response=="Tscore_abnormal"] <- "Abnormal child behavior"
+res <- response.plot[order(response.plot$Response),]
+res$Response <- factor(res$Response, levels = c("Overweight/obese", "Asthma", "Atopy", "Abnormal child behavior"),
+                       ordered=T)
+res <- res[order(res$Response), ]
+
+p_mid <- res |>
+  ggplot(aes(y = fct_rev(Response))) + 
+  theme_classic() +
+  geom_point(aes(x=MVA), shape=15, size=8,col="black") +
+  geom_linerange(aes(xmin=ci_low, xmax=ci_high)) +
+  geom_vline(xintercept = 1, linetype="dashed") +
+  labs(x="Coefficient", y="") +
+  coord_cartesian(ylim=c(1,nrow(res)), xlim=c(0.3, 2.3)) +
+  annotate("text", x = -1, y = 7.5, label = "Negatively associated with SES")  + 
+  theme(axis.line.y = element_blank(),
+        axis.ticks.y= element_blank(),
+        axis.text.y= element_blank(),
+        axis.title.y= element_blank())
+
+res <- res[,c("Response","MVA","ci_low","ci_high","MVA_P","MVA_N")]
+res_plot <-  res |>
+  # round estimates and 95% CIs to 2 decimal places for journal specifications
+  mutate(across(
+    c(MVA, ci_low, ci_high),
+    ~ str_pad(
+      round(.x, 3),
+      width = 4,
+      pad = "0",
+      side = "right")),
+  # add an "-" between HR estimate confidence intervals
+  estimate_lab = paste0(MVA, " (", ci_low, ",", ci_high, ")")) |>
+  # round p-values to two decimal places, except in cases where p < .001
+  mutate(MVA_P = case_when(
+    MVA_P < .001 ~ "<0.001",
+    round(MVA_P, 3) == .05 ~ as.character(round(MVA_P,3)),
+    MVA_P < .01 ~ str_pad( # if less than .01, go one more decimal place
+      as.character(round(MVA_P, 3)),
+      width = 4,
+      pad = "0",
+      side = "right"
+    ),
+    TRUE ~ str_pad( # otherwise just round to 2 decimal places and pad string so that .2 reads as 0.20
+      as.character(round(MVA_P, 3)),
+      width = 4,
+      pad = "0",
+      side = "right"))) |>
+  # add a row of data that are actually column names which will be shown on the plot in the next step
+  bind_rows(
+    data.frame(
+      Response = "Phenotype",
+      conf.low = "",
+      conf.high = "",
+      MVA_P = "p-value",
+      MVA_N = "N",
+      estimate_lab = "Odds Ratio (95% CI)")) |> 
+  mutate(Response = fct_rev(fct_relevel(Response, "Phenotype"))) 
+
+res_plot$Response <- factor(res_plot$Response, 
+                       levels=c( 
+                                 "Abnormal child behavior",  "Atopy",  "Asthma",
+                                 "Overweight/obese" ),ordered=T)
+res_plot <- res_plot[order(res_plot$Response),]
+
+p_left <-
+  res_plot  |>
+  ggplot(aes(y = Response)) +
+  geom_text(aes(x = 0, label = Response), hjust = 0, fontface = "bold") +
+  geom_text(
+    aes(x = 1, label = MVA_N),
+    hjust = 0,
+    fontface = ifelse(res_plot$MVA_N == "N", "bold", "plain")
+  ) + 
+  geom_text(
+    aes(x = 2, label = estimate_lab),
+    hjust = 0,
+    fontface = ifelse(res_plot$estimate_lab == "Odds Ratio (95% CI)", "bold", "plain")
+  ) +
+  theme_void() +
+  coord_cartesian(xlim = c(0, 4))
+
+p_right <-
+  res_plot  |>
+  ggplot() +
+  geom_text(
+    aes(x = 0, y = Response, label = MVA_P),
+    hjust = 0,
+    fontface = ifelse(res_plot$MVA_P == "p-value", "bold", "plain")
+  ) +
+  theme_void() 
+
+layout <- c(
+  patchwork::area(t = 0, l = 0, b = 30, r = 8), 
+  patchwork::area(t = 6, l = 8, b = 30, r = 18), 
+  patchwork::area(t = 0, l = 18, b = 30, r = 20) 
+)
+# final plot arrangement
+p_left + p_mid + p_right + plot_layout(design = layout)
+
+pdf("Figures/Figure4b SES & Phenotype.pdf", height=6, width=12)
+p_left + p_mid + p_right + plot_layout(design = layout)
+dev.off()
+```
+
+### Generate SES index + BF (4m) vs. phenotype (Fig 4g)
+```{r, echo=T, out.width="120%", warning=F, message=F}
+response.plot <- subset(Response.outcome, Cov=="SES_EBFcompound4m" & Cohort=="all")
+response.plot$ci_low <- round(exp(as.numeric(gsub("\\(","",strsplit2(response.plot$MVA_CI,",")[,1]))),2)
+response.plot$ci_high <- round(exp(as.numeric(gsub("\\)","",strsplit2(response.plot$MVA_CI,",")[,2]))),2)
+response.plot$MVA <- round(exp(response.plot$MVA),2)
+response.plot$sig <- ifelse(response.plot$MVA_P<0.05,"sig","nosig")
+response.plot$Direction <- ifelse(response.plot$MVA>0,"Positive","Negative")
+
+response.plot <- subset(response.plot, Response%in%c("atopy5y","asthma5y_ep","overweight","Tscore_abnormal","phenotype_atleast1"))
+response.plot$Response[response.plot$Response=="phenotype_atleast1"] <- "At least one health risk"
+response.plot$Response[response.plot$Response=="asthma5y_ep"] <- "Asthma"
+response.plot$Response[response.plot$Response=="atopy5y"] <- "Atopy"
+
+response.plot$Response[response.plot$Response=="overweight"] <- "Overweight/obese"
+response.plot$Response[response.plot$Response=="Tscore_abnormal"] <- "Abnormal child behavior"
+res <- response.plot[order(response.plot$Response),]
+res$Response <- factor(res$Response, levels = c( "At least one health risk", "Overweight/obese", "Asthma", "Atopy", "Abnormal child behavior"),
+                       ordered=T)
+res <- res[order(res$Response), ]
+
+res$Variables[res$Variables=="SES_EBFcompound4m2.Low SES w/ EBF to 4m"] <- "Low SES w/ EBF to 4m"
+res$Variables[res$Variables=="SES_EBFcompound4m3.High SES w/o EBF to 4m"] <- "High SES w/o EBF to 4m"
+res$Variables[res$Variables== "SES_EBFcompound4m4.High SES w/ EBF to 4m"] <- "High SES w/ EBF to 4m"
+
+res.new <- subset(res,Variables%in%c("Low SES w/ EBF to 4m","High SES w/o EBF to 4m","High SES w/ EBF to 4m"))
+res.new[,c("Response","Variables","MVA","MVA_P","M")]
+
+res.use <- subset(res, Response== "At least one health risk" & Variables%in%c("Low SES w/ EBF to 4m","High SES w/o EBF to 4m","High SES w/ EBF to 4m"))
+N.use <- with(subset(data.withmissing, !is.na(SES_EBFcompound4m) & !is.na(male) & !is.na(phenotype_atleast1)), table(SES_EBFcompound4m,phenotype_atleast1))
+N.use2 <- paste(N.use[,1],N.use[,2],sep="v")
+names(N.use2) <- rownames(N.use)
+res.use.add <- res.use[1,]
+res.use.add$MVA <- res.use.add$MVA_CI <- res.use.add$ci_high <- res.use.add$ci_low <- 1
+res.use.add$Variables <- "Low SES w/o EBF to 4m"
+res.use.add$MVA_P <- 1
+res.use <- rbind(res.use, res.use.add)
+res.use$MVA_N[res.use$Variables=="High SES w/o EBF to 4m"] <- N.use2["3.High SES w/o EBF to 4m"]
+res.use$MVA_N[res.use$Variables=="High SES w/ EBF to 4m"] <- N.use2["4.High SES w/ EBF to 4m"]
+res.use$MVA_N[res.use$Variables=="Low SES w/o EBF to 4m"] <- N.use2["1.Low SES w/o EBF to 4m"]
+res.use$MVA_N[res.use$Variables=="Low SES w/ EBF to 4m"] <- N.use2["2.Low SES w/ EBF to 4m"]
+
+
+res.use$Variables <-  factor(res.use$Variables, 
+                       levels=c("Low SES w/o EBF to 4m"  ,
+                                 "Low SES w/ EBF to 4m" ,
+                       
+                                 "High SES w/o EBF to 4m",
+                                "High SES w/ EBF to 4m"
+                                 
+                                    ),ordered=T)
+res.use <- res.use[order(res.use$Variables),]
+p_mid <- res.use |>
+  ggplot(aes(y = fct_rev(Variables))) + 
+  theme_classic() +
+  geom_point(aes(x=MVA), shape=15, size=8,col="black") +
+  geom_linerange(aes(xmin=ci_low, xmax=ci_high)) +
+  geom_vline(xintercept = 1, linetype="dashed") +
+  labs(x="Coefficient", y="") +
+  coord_cartesian( xlim=c(0.25, 1.25)) +
+  theme(axis.line.y = element_blank(),
+        axis.ticks.y= element_blank(),
+        axis.text.y= element_blank(),
+        axis.title.y= element_blank())
+
+res_plot <-  res.use |>
+  # round estimates and 95% CIs to 2 decimal places for journal specifications
+  mutate(across(
+    c(MVA, ci_low, ci_high),
+    ~ str_pad(
+      round(.x, 3),
+      width = 4,
+      pad = "0",
+      side = "right")),
+  # add an "-" between HR estimate confidence intervals
+  estimate_lab = paste0(MVA, " (", ci_low, ",", ci_high, ")")) |>
+  # round p-values to two decimal places, except in cases where p < .001
+  mutate(MVA_P = case_when(
+    MVA_P < .001 ~ "<0.001",
+    round(MVA_P, 3) == .05 ~ as.character(round(MVA_P,3)),
+    MVA_P < .01 ~ str_pad( # if less than .01, go one more decimal place
+      as.character(round(MVA_P, 3)),
+      width = 4,
+      pad = "0",
+      side = "right"
+    ),
+    TRUE ~ str_pad( # otherwise just round to 2 decimal places and pad string so that .2 reads as 0.20
+      as.character(round(MVA_P, 3)),
+      width = 4,
+      pad = "0",
+      side = "right"))) |>
+  # add a row of data that are actually column names which will be shown on the plot in the next step
+  bind_rows(
+    data.frame(
+      Response = "Phenotype",
+      conf.low = "",
+      conf.high = "",
+      MVA_P = "p-value",
+      MVA_N = "N",
+      estimate_lab = "Odds Ratio (95% CI)")) |> 
+  mutate(Response = fct_rev(fct_relevel(Response, "Phenotype"))) 
+
+res_plot$Variables <- factor(res_plot$Variables, 
+                       levels=c("High SES w/ EBF to 4m",
+                                 "High SES w/o EBF to 4m",
+                       
+                                  "Low SES w/ EBF to 4m" ,
+                                    "Low SES w/o EBF to 4m"  ),ordered=T)
+res_plot <- res_plot[order(res_plot$Variables),]
+res_plot$estimate_lab[res_plot$estimate_lab=="1 (1,1)"] <- "Ref"
+p_left <-
+  res_plot  |>
+  ggplot(aes(y = Variables)) +
+  geom_text(aes(x = 0, label = Variables), hjust = 0, fontface = "bold") +
+  geom_text(
+    aes(x = 1, label = MVA_N),
+    hjust = 0,
+    fontface = ifelse(res_plot$MVA_N == "N", "bold", "plain")
+  ) + 
+  geom_text(
+    aes(x = 2, label = estimate_lab),
+    hjust = 0,
+    fontface = ifelse(res_plot$estimate_lab == "Odds Ratio (95% CI)", "bold", "plain")
+  ) +
+  theme_void() +
+  coord_cartesian(xlim = c(0, 4))
+
+p_right <-
+  res_plot  |>
+  ggplot() +
+  geom_text(
+    aes(x = 0, y = Variables, label = MVA_P),
+    hjust = 0,
+    fontface = ifelse(res_plot$MVA_P == "p-value", "bold", "plain")
+  ) +
+  theme_void() 
+
+layout <- c(
+  patchwork::area(t = 0, l = 0, b = 30, r = 8), 
+  patchwork::area(t = 6, l = 8, b = 30, r = 18), 
+  patchwork::area(t = 0, l = 18, b = 30, r = 20) 
+)
+# final plot arrangement
+p_left + p_mid + p_right + plot_layout(design = layout)
+
+pdf("Figures/Figure 4g SESBF4m & Phenotype.pdf", height=6, width=12)
+p_left + p_mid + p_right + plot_layout(design = layout)
+dev.off()
+```
+
+## Explore role of Metagenomic
+## Run PERMANOVA analysis (Figure 4)
+```{r, echo=T, warning=FALSE, message=FALSE}
+load("/Users/darlene.dai/Desktop/Darlene Dai/Data/COPSAC Data/Data/COPSACmetagenomicdata_20250711.RData")
+############################################################################################################################
+data.div <- data.frame(sample_data(RBCOPSAC_species)[,c("SampleID", "abcno",   "Timepoint", "exact_age","shipment_date","Observed", "Shannon", "Chao")])
+data.div <- data.div[!(data.div$abcno=="2105" & data.div$Timepoint=="1y"),]
+data.div <- subset(data.div, exact_age<1.5)
+data.div <- subset(data.div, shipment_date<4.167)
+rownames(data.div) <- data.div$SampleID
+data.div$ProcessingPeriod <- data.div$shipment_date
+table(data.div$Timepoint)
+data.div$Visit <- data.div$Timepoint
+data.div$SubjectNumber <- data.div$abcno
+OTU = otu_table(data.frame(data.div[,c("Observed", "Shannon", "Chao")]), taxa_are_rows = FALSE)
+sampledata <- sample_data(RBCOPSAC_species)
+DIV <- phyloseq(OTU, sampledata)
+
+
+#No need to run again
+cov.vars <- c("MR1_latent.raw","bf")
+
+
+
+# # No need to run again
+# ############################################################################################################
+# library(vegan)
+# technical.vars <- c("ProcessingPeriod" ,"exact_age")
+# 
+# PERMANOVA.UVA <- NULL
+# visit.all <- c("1y","1m")
+# vars.use <- cov.vars
+# cohort <- "all"
+# for(data.type in c("Species")){
+#   if(data.type=="Species"){
+#     OTU.use <- RBCOPSAC_species_MCLR
+#   }
+# 
+#   for(visit in visit.all){
+#     if(visit%in%c("1m", "1y")){
+#       s.use <- as.character(data.div$SampleID[data.div$Visit==visit])
+#       s.use.subjectid <- as.character(data.div$SubjectNumber[data.div$Visit==visit])
+#     }
+#     for(missing in c("raw")){
+#       if(missing=="raw"){data.cli.p <- data.withmissing[data.withmissing$subjectnumber%in%s.use.subjectid,]}
+#       data.cli.p <- merge(data.cli.p, data.div[s.use,c("SubjectNumber","SampleID","Visit","exact_age","ProcessingPeriod")],
+#                           by.x="subjectnumber", by.y="SubjectNumber")
+# 
+#       data.cli.p$bf <- ifelse(data.cli.p$exact_age*12<data.cli.p$bf_duration_imp,1, 0)
+# 
+#       if(visit%in%c("1m", "1y")){
+#         rownames(data.cli.p) <- data.cli.p$subjectnumber
+#       }
+# 
+#       s.overlap <- data.cli.p$subjectnumber
+#       s.overlap <- as.character(s.overlap)
+#       otu.table.use <- data.frame(otu_table(OTU.use))
+# 
+#       otu.table.sub <- otu.table.use[s.use,]
+#       rownames(otu.table.sub) <- s.use.subjectid
+# 
+#       for(var.use in vars.use){
+# 
+#         var.model.use <- c("ProcessingPeriod" ,"exact_age", var.use)
+# 
+#         full.model <- paste("otu.table.model ~ ", paste(var.model.use, collapse = "+"))
+#         data.cli.p.nomissing <- na.omit(data.cli.p[,c(var.model.use)])
+# 
+#         s.nomissing <- as.character(rownames(data.cli.p.nomissing))
+#         data.cli.model <- data.cli.p[s.nomissing,]
+#         otu.table.model <- otu.table.sub[s.nomissing,]
+#         set.seed(343834)
+#         margin.permanova <- adonis2(as.formula(full.model),
+#                                     data = data.cli.p.nomissing,
+#                                     permutations = 999,
+#                                     method="euclidean",
+#                                     by="margin",
+#                                     strata =NULL)
+# 
+#         res.margin <- data.frame(Data=data.type,
+#                                  Imputation=missing,
+#                                  Visit=visit,
+#                                  Cohort=cohort,
+#                                  Var=c(var.model.use,"Residual","Total"),
+#                                  N=length(s.nomissing),
+#                                  Tes=var.use,
+#                                  R2.margin=margin.permanova$R2,
+#                                  Fvalue.margin=margin.permanova$F,
+#                                  p.margin=margin.permanova$`Pr(>F)`)
+# 
+#         res <- res.margin
+# 
+#         PERMANOVA.UVA <- rbind(PERMANOVA.UVA, res)
+#         save(PERMANOVA.UVA, file="PERMANOVARes.RData")
+#       }
+#     }
+#   }
+# }
+# 
+# varespec.bray.all <- NULL
+# visit.all <- c("1y","1m")
+# i <- 1
+# for(data.type in c("Species" )){
+#   if(data.type=="Species"){
+#     OTU.use <- RBCOPSAC_species_MCLR
+#   }
+# 
+#   for(visit in visit.all){
+#     if(visit%in%c("1m", "1y")){
+#       s.use <- as.character(data.div$SampleID[data.div$Visit==visit])
+#       s.use.subjectid <- as.character(data.div$SubjectNumber[data.div$Visit==visit])
+#     }
+#     for(missing in c("raw")){
+#       if(missing=="raw"){data.cli.p <- data.withmissing[data.withmissing$subjectnumber%in%s.use.subjectid,]}
+#       data.cli.p <- merge(data.cli.p, data.div[s.use,c("SubjectNumber","SampleID","exact_age","ProcessingPeriod")],
+#                           by.x="subjectnumber", by.y="SubjectNumber")
+# 
+#       if(visit%in%c("1m", "1y")){
+#         rownames(data.cli.p) <- data.cli.p$subjectnumber
+#       }
+# 
+#       s.overlap <- data.cli.p$subjectnumber
+#       s.overlap <- as.character(s.overlap)
+#       otu.table.use <- data.frame(otu_table(OTU.use))
+#       otu.table.sub <- otu.table.use[s.use,]
+#       rownames(otu.table.sub) <- s.use.subjectid
+#       vars.use <- "MR1_latent.raw"
+#       full.model <- paste("otu.table.model ~ ", paste(vars.use, collapse = "+"))
+#       data.cli.p.nomissing <- na.omit(data.cli.p[,vars.use,drop=F])
+# 
+#       s.nomissing <- as.character(rownames(data.cli.p.nomissing))
+#       data.cli.model <- data.cli.p[s.nomissing,]
+#       otu.table.model <- otu.table.sub[rownames(data.cli.model),]
+# 
+#       set.seed(343834)
+#       varespec.bray <- vegan::vegdist(otu.table.model, method = "euclidean") # dissimilarity matrix using bray-curtis distance indices on the varespec dataset native to vegan
+#       varespec.bray.all[[i]] <- list(varespec.bray,data.cli.model)
+#       names(varespec.bray.all)[i] <- paste(visit,data.type,sep="_")
+#       i <- i +1
+# 
+#     }
+#   }
+# }
+# 
+# 
+# library(ecodist)
+# 
+# pcoaVS.sp.1m <- ecodist::pco(varespec.bray.all$`1m_Species`[[1]], negvals = "zero", dround = 0)
+# pcoaVS.sp.1y <- ecodist::pco(varespec.bray.all$`1y_Species`[[1]], negvals = "zero", dround = 0)
+# 
+# pcoaVS.sp.1m$values[1]/sum(pcoaVS.sp.1m$values)
+# pcoaVS.sp.1m$values[2]/sum(pcoaVS.sp.1m$values)
+# 
+# pcoaVS.sp.1y$values[1]/sum(pcoaVS.sp.1y$values)
+# pcoaVS.sp.1y$values[2]/sum(pcoaVS.sp.1y$values)
+# 
+# data1 <- data.frame(subjectnumber=rownames(varespec.bray.all$`1m_Species`[[2]]),
+#                     sp.1m.PCoA1=scale(pcoaVS.sp.1m$vectors[,1]),
+#                     sp.1m.PCoA2=scale(pcoaVS.sp.1m$vectors[,2]))
+# data2 <- data.frame(subjectnumber=rownames(varespec.bray.all$`1y_Species`[[2]]),
+#                     sp.1y.PCoA1=scale(pcoaVS.sp.1y$vectors[,1]),
+#                     sp.1y.PCoA2=scale(pcoaVS.sp.1y$vectors[,2]))
+# 
+# data.pcoa <- merge(data1, data2,by="subjectnumber",all=T)
+# 
+# save(PERMANOVA.UVA, data.pcoa,varespec.bray.all, file= "PCOAData.RData")
+
+load("PCOAData.RData")
+pcoaVS.sp.1m <- ecodist::pco(varespec.bray.all$`1m_Species`[[1]], negvals = "zero", dround = 0)
+pcoaVS.sp.1y <- ecodist::pco(varespec.bray.all$`1y_Species`[[1]], negvals = "zero", dround = 0)
+```
+
+### Generate PCoA figure (Figure 4cd)
+```{r, echo=T, warning=FALSE, message=FALSE, out.width="200%"}
+pcoa.plot <- vector("list")
+pco.i <- 1
+data.alpha.all.both <- NULL
+visit <- "1y"
+visit <- "1m"
+for(visit in c("1y", "1m")){
+  sig.use <- "top5"
+  
+  if(sig.use=="top5"){
+    if(visit=="1m"){
+      used.pco.vars <- unique(c("bf","MR1_latent.raw"))
+      
+    }
+   
+    if(visit=="1y"){
+      used.pco.vars <- unique(c("bf","MR1_latent.raw"))
+      
+    }
+    varespec.bray.use <- varespec.bray.all
+  }
+
+  if(visit=="1m"){
+    pcoaVS <- ecodist::pco(varespec.bray.use$`1m_Species`[[1]], negvals = "zero", dround = 0)
+    data.alpha.all <- varespec.bray.use$`1m_Species`[[2]]
+    data.alpha.all$Visit <- "1m"
+  }
+  if(visit=="1y"){
+    pcoaVS <- ecodist::pco(varespec.bray.use$`1y_Species`[[1]], negvals = "zero", dround = 0) 
+    data.alpha.all <- varespec.bray.use$`1y_Species`[[2]]
+    data.alpha.all$Visit <- "1y"
+  }
+  data.alpha.all$PCoA1 <- pcoaVS$vectors[,1]
+  data.alpha.all$PCoA2 <- pcoaVS$vectors[,2]
+  data.alpha.all$PCoA3 <- pcoaVS$vectors[,3]
+  data.alpha.all$PCoA4 <- pcoaVS$vectors[,4]
+  
+ 
+  data.alpha.all$bf <- ifelse(data.alpha.all$exact_age*12<data.alpha.all$bf_duration_imp,1, 0)
+  if(any(!used.pco.vars%in%colnames(data.alpha.all))){
+    data.alpha.all <- merge(data.alpha.all, data.withmissing[,c("subjectnumber",used.pco.vars[!used.pco.vars%in%colnames(data.alpha.all)])],by="subjectnumber",all.x=T)
+  }
+
+  arrows <- NULL
+  for(permanova.var in c(used.pco.vars)){
+    data.alpha.all.use <- na.omit(data.alpha.all[,c("PCoA1",permanova.var)])
+    r1 <- cor(data.alpha.all.use[,"PCoA1"], as.numeric(data.alpha.all.use[,permanova.var]), method="pearson")
+    data.alpha.all.use <- na.omit(data.alpha.all[,c("PCoA2",permanova.var)])
+    r2 <- cor(data.alpha.all.use[,"PCoA2"], as.numeric(data.alpha.all.use[,permanova.var]), method="pearson")
+    data.alpha.all.use <- na.omit(data.alpha.all[,c("PCoA3",permanova.var)])
+    r3 <- cor(data.alpha.all.use[,"PCoA3"], as.numeric(data.alpha.all.use[,permanova.var]), method="pearson")
+    data.alpha.all.use <- na.omit(data.alpha.all[,c("PCoA4",permanova.var)])
+    r4 <- cor(data.alpha.all.use[,"PCoA4"], as.numeric(data.alpha.all.use[,permanova.var]), method="pearson")
+    
+    res <- data.frame(var=permanova.var, PCoA1=r1, PCoA2=r2, PCoA3=r3, PCoA4=r4)
+    arrows <- rbind(arrows, res)
+  }
+  arrows <- merge(arrows, unique(data.map.use), by.x="var", by.y="Vars",all.x=T)
+  
+  data.alpha.all$SES.cat <- ifelse(data.alpha.all$cat_SES=="1.0-25%", "SES Q1",
+                                   ifelse(data.alpha.all$cat_SES=="2.25-50%", "SES Q2",
+                                          ifelse(data.alpha.all$cat_SES=="3.50-75%", "SES Q3","SES Q4")))
+  
+
+
+  if(visit=="1m"){
+    pmain1 <- ggplot(data=subset(data.alpha.all,!is.na(MR1_latent.raw)), aes(PCoA1, PCoA3))+
+       geom_point(aes(col=SES.cat)) +
+      stat_ellipse(aes(fill=SES.cat), alpha=1,type='t',size =1, geom="polygon") + ##changes shading on ellipses
+      theme_bw() +
+      theme(aspect.ratio = 1)+
+      scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) +
+      scale_color_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) 
+    pmain2 <- ggplot(data=subset(data.alpha.all,!is.na(MR1_latent.raw)), aes(PCoA1, PCoA3))+
+      # geom_point(aes(col=SES.cat)) +
+      stat_ellipse(aes(fill=SES.cat), type='t',size =1, geom="polygon") + ##changes shading on ellipses
+      theme_bw() +
+      theme(aspect.ratio = 1)+
+      geom_segment(data=arrows, aes(x=0, y=0, xend=PCoA1/0.02, yend=PCoA3/0.02), 
+                   arrow=arrow(length=unit(.2, "cm")),color="gray", size=1) +
+      geom_label_repel(data=arrows, aes(x=PCoA1/0.02, y=PCoA3/0.02, label=Label),
+                       label.size = NA, 
+                       fontface = 'bold', color = 'black',
+                       max.overlaps = getOption("ggrepel.max.overlaps", default = 100),
+                       box.padding = 0.80, point.padding = 0.5) +
+      scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) +
+      scale_color_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) 
+    
+    # Marginal densities along x axis
+    my_comparisons <- list(c("SES Q1","SES Q2"),c("SES Q1","SES Q3"),c("SES Q1","SES Q4"))
+    
+    xdens <- axis_canvas(pmain1, axis = "x") +
+      geom_boxplot(data = subset(data.alpha.all,!is.na(MR1_latent.raw)), aes(x = PCoA1, fill = SES.cat),
+                    size = 0.2)  +
+      scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) 
+    # Marginal densities along y axis
+    # Need to set coord_flip = TRUE, if you plan to use coord_flip()
+    ydens <- axis_canvas(pmain1, axis = "y", coord_flip = TRUE) +
+      geom_boxplot(data = subset(data.alpha.all,!is.na(MR1_latent.raw)), aes(x = PCoA3, fill = SES.cat),
+                    size = 0.2)  +
+      scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) +
+      coord_flip() 
+    p1 <- insert_xaxis_grob(pmain2, xdens, grid::unit(.1, "null"), position = "top")
+    p2 <- insert_yaxis_grob(p1, ydens, grid::unit(.1, "null"), position = "right")
+    ggdraw(p2)
+  }
+  if(visit=="1y"){
+    pmain1 <- ggplot(data=subset(data.alpha.all,!is.na(MR1_latent.raw)), aes( PCoA1,PCoA3))+
+      # geom_point(aes(col=SES.cat)) +
+      stat_ellipse(aes(fill=SES.cat),type='t',size =1, geom="polygon") + ##changes shading on ellipses
+      theme_bw() +
+      theme(aspect.ratio = 1)+
+      scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) +
+      scale_color_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) 
+    pmain2 <- ggplot(data=subset(data.alpha.all,!is.na(MR1_latent.raw)), aes(PCoA1, PCoA3))+
+      # geom_point(aes(col=SES.cat)) +
+      stat_ellipse(aes(fill=SES.cat),type='t',size =1, geom="polygon") + ##changes shading on ellipses
+      theme_bw() +
+      theme(aspect.ratio = 1)+
+      geom_segment(data=arrows, aes(x=0, y=0, xend=PCoA1/0.02, yend=PCoA3/0.02), 
+                   arrow=arrow(length=unit(.2, "cm")),color="gray", size=1) +
+      geom_label_repel(data=arrows, aes(x=PCoA1/0.02, y=PCoA3/0.02, label=Label),
+                       label.size = NA, 
+                       fontface = 'bold', color = 'black',
+                       max.overlaps = getOption("ggrepel.max.overlaps", default = 100),
+                       box.padding = 0.80, point.padding = 0.5) +
+      scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) +
+      scale_color_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) 
+    
+    
+    # Marginal densities along x axis
+    my_comparisons <- list(c("SES Q1","SES Q2"),c("SES Q1","SES Q3"),c("SES Q1","SES Q4"))
+    
+    xdens <- axis_canvas(pmain1, axis = "x") +
+      geom_boxplot(data = subset(data.alpha.all,!is.na(MR1_latent.raw)), aes(x = PCoA1, fill = SES.cat),
+                    size = 0.2) +
+      scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) 
+    # Marginal densities along y axis
+    # Need to set coord_flip = TRUE, if you plan to use coord_flip()
+    ydens <- axis_canvas(pmain1, axis = "y", coord_flip = TRUE) +
+      geom_boxplot(data = subset(data.alpha.all,!is.na(MR1_latent.raw)), aes(x = PCoA3, fill = SES.cat),
+                   size = 0.2) +
+      scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e"))  +
+      coord_flip() 
+    p1 <- insert_xaxis_grob(pmain2, xdens, grid::unit(.1, "null"), position = "top")
+    p2 <- insert_yaxis_grob(p1, ydens, grid::unit(.1, "null"), position = "right")
+
+  }
+      
+    pcoa.plot[[pco.i]] <-   p2 
+    names(pcoa.plot)[pco.i] <- visit
+    pco.i <- pco.i + 1
+    
+  data.alpha.all$Visit <- visit
+  data.alpha.all.both <- rbind(data.alpha.all.both, data.alpha.all)
+}
+
+lm.res <- data.frame(Visit=c(rep("1m",4),rep("1y",4)),
+           variable=c(paste0("PCoA",1:4),paste0("PCoA",1:4)),
+           pval=c(summary(lm(PCoA1 ~ MR1_latent.raw + exact_age + ProcessingPeriod, subset(data.alpha.all.both,Visit=="1m")))$coef[2,4],
+summary(lm(PCoA2 ~ MR1_latent.raw + exact_age + ProcessingPeriod, subset(data.alpha.all.both,Visit=="1m")))$coef[2,4],
+summary(lm(PCoA3 ~ MR1_latent.raw + exact_age + ProcessingPeriod, subset(data.alpha.all.both,Visit=="1m")))$coef[2,4],
+summary(lm(PCoA4 ~ MR1_latent.raw + exact_age + ProcessingPeriod, subset(data.alpha.all.both,Visit=="1m")))$coef[2,4],
+summary(lm(PCoA1 ~ MR1_latent.raw + exact_age + ProcessingPeriod, subset(data.alpha.all.both,Visit=="1y")))$coef[2,4],
+summary(lm(PCoA2 ~ MR1_latent.raw + exact_age + ProcessingPeriod, subset(data.alpha.all.both,Visit=="1y")))$coef[2,4],
+summary(lm(PCoA3 ~ MR1_latent.raw + exact_age + ProcessingPeriod, subset(data.alpha.all.both,Visit=="1y")))$coef[2,4],
+summary(lm(PCoA4 ~ MR1_latent.raw + exact_age + ProcessingPeriod, subset(data.alpha.all.both,Visit=="1y")))$coef[2,4]))
+
+lm.res$label.use <- paste0("Regression p-value=",signif(lm.res$pval,digits=2))
+lm.res$Visit <- factor(lm.res$Visit, levels=c("1m", "1y"), ordered=T)
+lm.res$pval <- signif(lm.res$pval, digits=2)
+
+pdf("Figures/Figure 4cd PCoA ggplot.pdf", height=4, width=10)
+library(reshape2)
+data.pcoa <- melt(data.alpha.all.both[,c("subjectnumber","Visit","MR1_latent.raw","SES.cat","PCoA1","PCoA2","PCoA3","PCoA4")],
+                  id.vars =c("subjectnumber","Visit","MR1_latent.raw","SES.cat") )
+data.pcoa$Visit <- factor(data.pcoa$Visit, levels=c("1m", "1y"), ordered=T)
+data.pcoa$Selected <- paste(data.pcoa$Visit,data.pcoa$variable,sep="_")
+data.pcoa.select <- subset(data.pcoa, Selected %in%c("1m_PCoA3","1y_PCoA3"))
+data.pcoa.select$Selected <- factor(data.pcoa.select$Selected, levels=c("1m_PCoA3", "1y_PCoA3"), ordered = T)
+lm.res$Selected <- paste(lm.res$Visit,lm.res$variable,sep="_")
+lm.res.select <- subset(lm.res, Selected %in%c("1m_PCoA3","1y_PCoA3"))
+lm.res.select$Selected <- factor(lm.res.select$Selected, levels=c("1m_PCoA3", "1y_PCoA3"), ordered = T)
+
+ggplot(data = subset(data.pcoa.select,!is.na(MR1_latent.raw)), aes(y = value, fill = SES.cat, x=SES.cat),
+       alpha = 0.7, size = 0.2) +
+  geom_boxplot() +
+  scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) +
+  stat_compare_means(comparisons = my_comparisons, label="p.signif",
+                     step.increase = 0.03, tip.length = 0.01) +
+  facet_grid(~Selected, scale="free") +
+  theme_bw() + xlab("SES quartiles") +
+  geom_text(data=lm.res.select,
+            aes(x = 4, y = -10,
+                label=pval), parse = TRUE, inherit.aes=FALSE) 
+dev.off()
+
+ggplot(data = subset(data.pcoa,!is.na(MR1_latent.raw)), aes(y = value, fill = SES.cat, x=SES.cat),
+       alpha = 0.7, size = 0.2) +
+  geom_boxplot() +
+  scale_fill_manual(values=c("#c3d7bd", "#a4c19a", "#5d836e", "#3f615e")) +
+  stat_compare_means(comparisons = my_comparisons, label="p.signif",position = position_nudge(y = 2)) +
+  facet_grid(variable~Visit, scale="free") +
+  theme_bw() + xlab("SES quartiles") +
+  geom_text(data=lm.res,
+            aes(x = 4, y = -10,
+                label=pval), parse = TRUE, inherit.aes=FALSE) 
+```
+
+### Generate SEM model (Figure 4ef)
+```{r, echo=T, warning=FALSE, message=FALSE}
+########################################################################################################
+ses.res <- subset(UVA.res.outcome, Adj.genetic==F & Variables=="MR1_latent.raw.interquartile" &
+                    !Variables%in%c("sitetoronto","sitevancouver","sitewinnipeg"))
+varespec.bray.use <- varespec.bray.all
+pcoaVS.sp.3m <- ecodist::pco(varespec.bray.use$`1m_Species`[[1]], negvals = "zero", dround = 0) # if negvals = 0 sets all negative eigenvalues to zero; if = "rm" corrects for negative eigenvalues using method 1 of Legendre and Anderson 1999
+pcoaVS.sp.1y <- ecodist::pco(varespec.bray.use$`1y_Species`[[1]], negvals = "zero", dround = 0) # if negvals = 0 sets all negative eigenvalues to zero; if = "rm" corrects for negative eigenvalues using method 1 of Legendre and Anderson 1999
+
+data1 <- data.frame(subjectnumber=rownames(varespec.bray.all$`1m_Species`[[2]]),
+                    sp.1m.PCoA1=scale(pcoaVS.sp.1m$vectors[,1]),
+                    sp.1m.PCoA2=scale(pcoaVS.sp.1m$vectors[,2]),
+                    sp.1m.PCoA3=scale(pcoaVS.sp.1m$vectors[,3]),
+                    sp.1m.PCoA4=scale(pcoaVS.sp.1m$vectors[,4]))
+data2 <- data.frame(subjectnumber=rownames(varespec.bray.all$`1y_Species`[[2]]),
+                    sp.1y.PCoA1=scale(pcoaVS.sp.1y$vectors[,1]),
+                    sp.1y.PCoA2=scale(pcoaVS.sp.1y$vectors[,2]),
+                    sp.1y.PCoA3=scale(pcoaVS.sp.1y$vectors[,3]),
+                    sp.1y.PCoA4=scale(pcoaVS.sp.1y$vectors[,4]))
+data.pcoa <- merge(data1, data2,by="subjectnumber",all=T)
+data.pcoa <- merge(data.pcoa[,c("subjectnumber","sp.1m.PCoA1","sp.1y.PCoA1","sp.1m.PCoA2","sp.1y.PCoA2","sp.1m.PCoA3","sp.1y.PCoA3","sp.1m.PCoA4","sp.1y.PCoA4")],
+                   merge(subset(data.div, Visit=="1m", select=c("SubjectNumber", "exact_age","ProcessingPeriod")),
+                         subset(data.div, Visit=="1y", select=c("SubjectNumber", "exact_age","ProcessingPeriod")), suffixes = c(".1m",".1y"), by="SubjectNumber",all=T),
+                   by.x="subjectnumber", by.y ="SubjectNumber",all.x=T)
+outcome.vars <- c("asthma5y_ep","overweight","atopy5y")
+data.sem <- merge(data.withmissing, data.pcoa, by="subjectnumber",all.x=T)
+
+data.sem$bf.1m <- ifelse(data.sem$exact_age.1m*12<data.sem$bf_duration_imp,1, 0)
+data.sem$bf.1y <- ifelse(data.sem$exact_age.1y*12<data.sem$bf_duration_imp,1, 0)
+
+
+cate.vars.all <- data.map$Vars[data.map$Type=="Categorical"]
+
+
+###########################################################################
+
+res.vars.list <- list(c("sp.1m.PCoA3"),c("sp.1y.PCoA3"))
+
+cutoff.uses <- c(1.1)
+impute.uses <- c(T)
+SEM.RES.ALL <- vector("list")
+sem.i <- 1
+bf.vars.use <- c("bf")
+
+for(bf.var.use in bf.vars.use){
+  for(cutoff.use in cutoff.uses){
+    for(resp.vars in res.vars.list){
+
+      cov.use <- unique(c(ses.res$Response[ses.res$UVA_P<cutoff.use]))
+
+      used.vars <- NULL
+      data.sem.use <-  data.sem[!is.na(data.sem$MR1_latent.raw),]
+      adj.main <- NULL
+
+      m.main.all<- m.test.all <- cov.use.mediators.all <- adj.vars.all <- NULL
+      for(resp.var in resp.vars){
+        cov.use.mediators <- used.vars
+        if(resp.var%in%c("sp.1m.PCoA1","sp.1m.PCoA2","sp.1m.PCoA3","sp.1m.PCoA4")){
+          cov.use.mediators <- cov.use.mediators[!cov.use.mediators%in%c("maternaldistress_perceived_1y", "awayhome1h_1y", "atbx.1y" )]
+          if(bf.var.use=="bf"){
+            cov.use.mediators <- c( "bf.1m",cov.use.mediators)
+          }else{
+            cov.use.mediators <- c( "EBF_6m",cov.use.mediators)
+          }
+          adj.vars <- c(adj.main, "ProcessingPeriod.1m","exact_age.1m")
+          m.main <- paste(resp.var, " ~ dir1*MR1_latent.raw +", paste(paste0("mm",resp.var,cov.use.mediators,"*",cov.use.mediators),collapse=" + "), " + ",paste(adj.vars, collapse = " + "))
+          m.test <- paste0("ind_",resp.var,"_",cov.use.mediators, " := ", paste0("mr",cov.use.mediators), "*", paste0("mm",resp.var,cov.use.mediators))
+        }
+
+        if(resp.var%in%c("sp.1y.PCoA1","sp.1y.PCoA2","sp.1y.PCoA3","sp.1y.PCoA4")){
+
+          if(bf.var.use=="bf"){
+            cov.use.mediators <- c( "bf.1y",cov.use.mediators)
+          }else{
+            cov.use.mediators <- c( "EBF_6m",cov.use.mediators)
+          }
+          adj.vars <- c(adj.main, "ProcessingPeriod.1y","exact_age.1y")
+          m.main <- paste(resp.var, " ~ dir1*MR1_latent.raw +", paste(paste0("mm",resp.var,cov.use.mediators,"*",cov.use.mediators),collapse=" + "), " + ",paste(adj.vars, collapse = " + "))
+          m.test <- paste0("ind_",resp.var,"_",cov.use.mediators, " := ", paste0("mr",cov.use.mediators), "*", paste0("mm",resp.var,cov.use.mediators))
+        }
+        add.m <- NULL
+        if("bf.1m"%in%cov.use.mediators.all & "bf.1y"%in%cov.use.mediators.all){
+          add.m <- c(add.m, "bf.1m ~~ bf.1y")
+        }
+        m.main.all <- c(m.main.all, m.main)
+        m.test.all <- c(m.test.all, m.test)
+        cov.use.mediators.all <- unique(c(cov.use.mediators.all, cov.use.mediators))
+        adj.vars.all <- unique(c(adj.vars.all, adj.vars))
+      }
+      # m.each <- c(paste(cov.use.mediators.all,"~ ", paste0("mr",cov.use.mediators.all), "*MR1_latent.raw"," + ",paste(adj.main, collapse = " + ") ))
+       m.each <- c(paste(cov.use.mediators.all,"~ ", paste0("mr",cov.use.mediators.all), "*MR1_latent.raw" ))
+      used.all.vars <- c(resp.vars, cov.use.mediators.all)
+      for(j in 1:length(used.all.vars)){
+        data.sem.use[,used.all.vars[j]] <- as.numeric(as.character(data.sem.use[,used.all.vars[j]] ))
+      }
+
+      if("sp.1m.PCoA1"%in%resp.vars | "sp.1y.PCoA3"%in%resp.vars){
+        change.bf.id <- which(gsub("bf.1m ~ ","",m.each)!=m.each | gsub("bf_duration.1m ~ ","",m.each)!=m.each )
+        if(length(change.bf.id)>0){
+          m.each[change.bf.id] <- paste(m.each[change.bf.id], "+ exact_age.3m")
+        }
+        change.bf.id <- which(gsub("bf.1y ~ ","",m.each)!=m.each |
+                                gsub("bf_duration.1y ~ ","",m.each)!=m.each |
+                                gsub("atbx.micro1y ~ ","",m.each)!=m.each)
+        if(length(change.bf.id)>0){
+          m.each[change.bf.id] <- paste(m.each[change.bf.id], "+ exact_age.1y")
+        }
+      }
+
+      model.use <- c(m.main.all, m.each, add.m, m.test.all)
+      model.all <- sem(paste(model.use,sep="\n"),
+                       data=data.sem.use,
+                       ordered=used.all.vars[used.all.vars%in%cate.vars.all],
+                       missing="pairwise")
+      summary(model.all)
+      kk <- parameterEstimates(model.all,standardized = T)
+      kk.use <- kk[gsub("ind_","",kk$lhs)!=kk$lhs,]
+      mod_indices <- modindices(model.all, sort = TRUE, alpha=0.05)
+      adj.M <- updatemodel(mod_indices,
+                           var.add.covs=list(c(cov.use.mediators.all)),
+                           model.use,
+                           data.sem.use,
+                           ordered.vars=used.all.vars[used.all.vars%in%cate.vars.all],
+                           missing.use="pairwise")
+      adj.M.use <- adj.M
+      model.use.final <- c(model.use, adj.M.use)
+      model.all.final <- sem(paste(model.use.final,collapse = "\n"),
+                             data=data.sem.use,
+                             ordered=used.all.vars[used.all.vars%in%cate.vars.all],
+                             missing="pairwise")
+
+
+      SEM.RES.ALL[[sem.i]] <- list(model.use.final, model.all.final)
+      names(SEM.RES.ALL)[sem.i] <- paste(resp.vars,cutoff.use,bf.var.use,collapse = "_")
+      sem.i <- sem.i + 1
+    }
+  }
+}
+
+library(lavaan)
+
+names(SEM.RES.ALL)
+used.test <-  "sp.1m.PCoA3 1.1 bf" 
+model.all.final <- SEM.RES.ALL[[used.test]][[2]]
+kk <- parameterEstimates(model.all.final,standardized = T)
+kk.use <- kk[gsub("ind_","",kk$lhs)!=kk$lhs,]
+dd <- subset(kk.use, pvalue<0.05)
+FIT <- as.data.frame(t(summary(model.all.final, fit.measures=TRUE)$fit[c("cfi","tli","srmr","rmsea")]))
+FIT
+dd
+unique(c(subset(kk,lhs=="sp.1m.PCoA3")$rhs))
+kk.use[,c("label","est","pvalue","std.all")]
+kk[kk$lhs=="sp.1m.PCoA3" & kk$pvalue<0.05,c("rhs","std.all","pvalue")]
+kk[kk$rhs=="MR1_latent.raw" & kk$pvalue<0.05,c("lhs","std.all","pvalue")]
+summary(model.all.final, fit=T)
+
+used.test <-  "sp.1y.PCoA3 1.1 bf"
+model.all.final <- SEM.RES.ALL[[used.test]][[2]]
+kk <- parameterEstimates(model.all.final,standardized = T)
+kk.use <- kk[gsub("ind_","",kk$lhs)!=kk$lhs,]
+dd <- subset(kk.use, pvalue<0.05)
+FIT <- as.data.frame(t(summary(model.all.final, fit.measures=TRUE)$fit[c("cfi","tli","srmr","rmsea")]))
+FIT
+dd
+kk[kk$lhs=="sp.1y.PCoA3" & kk$pvalue<0.05,c("rhs","std.all","pvalue")]
+kk[kk$rhs=="MR1_latent.raw" & kk$pvalue<0.05,c("lhs","std.all","pvalue")]
+summary(model.all.final, fit=T)
+```
+
+## Run Maaslin2 analysis (Figure S4)
+## Identify the species associated with SES and BF
+```{r, echo=T, warning=FALSE, message=FALSE}
+############################################################################################################################
+data.div <- data.frame(sample_data(RBCOPSAC_species)[,c("SampleID", "abcno",   "Timepoint", "exact_age","shipment_date","Observed", "Shannon", "Chao")])
+data.div <- data.div[!(data.div$abcno=="2105" & data.div$Timepoint=="1y"),]
+table(data.div$Timepoint)
+data.div <- subset(data.div, exact_age<1.5)
+data.div <- subset(data.div, shipment_date<4.167)
+rownames(data.div) <- data.div$SampleID
+data.div$ProcessingPeriod <- data.div$shipment_date
+table(data.div$Timepoint)
+data.div$Visit <- data.div$Timepoint
+data.div$SubjectNumber <- data.div$abcno
+length(which(with(data.div, table(SubjectNumber))==2))
+
+OTU = otu_table(data.frame(data.div[,c("Observed", "Shannon", "Chao")]), taxa_are_rows = FALSE)
+sampledata <- sample_data(data.div)
+DIV <- phyloseq(OTU, sampledata)
+
+sample_data(RBCOPSAC_species_MCLR) <- sample_data(data.div)
+
+# Maaslin2 analysis (no need to run again)
+#Remove the samples not prevalent enough
+remove_rare <- function( table , cutoff_pro ) {
+  row2keep <- c()
+  cutoff <- ceiling( cutoff_pro * ncol(table) )
+  for ( i in 1:nrow(table) ) {
+    row_nonzero <- length( which( table[ i , ]  > 0 ) )
+    if ( row_nonzero > cutoff ) {
+      row2keep <- c( row2keep , i)
+    }
+  }
+  return( table [ row2keep , , drop=F ])
+}
+library(vegan)
+SES.maaslin <- NULL
+SES.maaslin <- unique(SES.maaslin)
+SES.vars <- c("MR1_latent.raw")
+outcome.vars <- c("atopy5y", "asthma5y_ep", "overweight","Tscore_abnormal","phenotype_atleast1")
+cov.vars <- c("bf")
+used.vars <- c(SES.vars, outcome.vars, cov.vars)
+#Generate phenotype with at least one of these SES-associated health risks
+data.resp.sum <- data.withmissing[,c("asthma5y_ep", "overweight")]
+for(i in 1:ncol(data.resp.sum)){data.resp.sum[,i] <- as.numeric(as.character(data.resp.sum[,i]))}
+nomissing.sum <- apply(data.resp.sum,1,sum)
+missing.sum <- apply(data.resp.sum,1,function(x)sum(x, na.rm=T))
+data.withmissing$phenotype_atleast1 <- ifelse(missing.sum>=1,1, ifelse(nomissing.sum==0,0, NA))
+
+data.withmissing.bf <- merge(data.withmissing,subset(data.div, Visit=="1m"),by.x="subjectnumber", by.y="SubjectNumber")
+
+data.withmissing.bf$bf <- ifelse(data.withmissing.bf$exact_age*12<data.withmissing.bf$bf_duration_imp,1, 0)
+nobf.id <- unique(data.withmissing.bf$subjectnumber[data.withmissing.bf$bf==0 & !is.na(data.withmissing.bf$bf) &
+                                                      data.withmissing.bf$bf_duration_imp<3])
+
+prev.cts <- c(0.1)
+adj.vars.basics <- list(c("ProcessingPeriod", "exact_age"))
+# SES.maaslin <- NULL
+# 
+# for(data.type in c("DIV","Species")){
+#   if(data.type%in%c("DIV")){
+#     norm.methods <- c("raw")
+#     if(data.type=="DIV"){
+#       visit.all <- c("1m", "1y","longitudinal")#
+#     }else{
+#       visit.all <- c("1y")
+#     }
+#   }else{
+#     norm.methods <- "MCLR"
+#     visit.all <- c("longitudinal")
+#   }
+#   for(norm.method in norm.methods){
+# 
+#     if(norm.method=="raw" & data.type=="DIV"){
+#       RBNME.use <- DIV
+#       norm.use <- "none"
+#       trans.use <- "none"
+#     }
+# 
+#     if(norm.method=="MCLR"){
+#       if(data.type=="Species"){
+#         RBNME.use <- RBCOPSAC_species_MCLR
+#       }
+# 
+#       norm.use <- "none"
+#       trans.use <- "none"
+#     }
+#     if(norm.method=="TSSLOG"){
+#       if(data.type=="Species"){
+#         RBNME.use <- RBCOPSAC_species
+#       }
+#       norm.use <- "none"
+#       trans.use <- "LOG"
+#     }
+#     for(adj.vars.basic in adj.vars.basics){
+#       for(visit in visit.all){
+#         OTU.use <- RBNME.use
+#         for(prev.ct in prev.cts){
+#           min.use <- -Inf
+#           prev.use <- -Inf
+#           if(prev.ct==-Inf){
+#             used.sp <- colnames(otu_table(RBNME.use))
+# 
+#           }else{
+#             if(visit!="longitudinal"){
+#               if(data.type=="Species"){
+#                 RBNME.use.pvt <- RBCOPSAC_species
+#               }
+# 
+#               if(data.type=="DIV"){
+#                 RBNME.use.pvt <- DIV
+#               }
+# 
+#               otu.use.sgv <- subset_samples(RBNME.use.pvt, Visit==visit)
+#               otu.use.sgv <- remove_rare(table=t(otu_table(otu.use.sgv)), cutoff_pro=0)
+#               used.sp<-rownames(otu.use.sgv)
+#             }
+#             if(visit=="longitudinal"){
+#               if(data.type=="Species"){
+#                 RBNME.use.pvt <- RBCOPSAC_species
+#                    otu.use.sgv <- RBNME.use.pvt
+#               otu.use.sgv <- remove_rare(table=(otu_table(otu.use.sgv)), cutoff_pro=0)
+#               }
+# 
+#               if(data.type=="DIV"){
+#                 RBNME.use.pvt <- DIV
+#                 otu.use.sgv <- RBNME.use.pvt
+#               otu.use.sgv <- remove_rare(table=t(otu_table(otu.use.sgv)), cutoff_pro=0)
+#               }
+# 
+#               #remove metaphlan.table.SGB.s.3m with prevalence less than 10%
+#               used.sp<-rownames(otu.use.sgv)
+#             }
+#           }
+# 
+#           if(visit=="longitudinal"){
+#             s.use.subjectid <-  names(which(table(data.div$SubjectNumber)>0))
+#             s.use <- as.character(data.div$SampleID[data.div$SubjectNumber%in%s.use.subjectid])
+#           }
+#           if(visit%in%c("1m", "1y")){
+#             s.use <- as.character(data.div$SampleID[data.div$Visit==visit])
+#             s.use.subjectid <- as.character(data.div$SubjectNumber[data.div$Visit==visit])
+#           }
+#           for(missing in c("raw")){
+#             if(missing=="raw"){data.cli.p <- data.withmissing[data.withmissing$subjectnumber%in%s.use.subjectid,]}
+#             data.cli.p <- merge(data.cli.p,
+#                                 data.div[s.use,c("SubjectNumber","Visit","SampleID","exact_age","ProcessingPeriod")],
+#                                 by.x="subjectnumber", by.y="SubjectNumber")
+# 
+#             data.cli.p <- subset(data.cli.p, exact_age<1.5)
+#             data.cli.p$bf <- ifelse(data.cli.p$exact_age*12<data.cli.p$bf_duration_imp,1, 0)
+# 
+#             if(visit%in%c("1m", "1y")){
+#               rownames(data.cli.p) <- data.cli.p$subjectnumber
+#             }
+#             if(visit=="longitudinal"){
+#               rownames(data.cli.p) <- data.cli.p$SampleID
+#             }
+#             for(bf.sub in c("NoBF","AnyBF","All")){#,
+# 
+#               if(bf.sub=="All"){s.overlap <- rownames(data.cli.p)}
+#               if(bf.sub=="AnyBF"){
+#                 s.overlap <- rownames(data.cli.p)[data.cli.p$bf==1 & !is.na(data.cli.p$bf)]
+#               }
+#               if(bf.sub=="NoBF"){
+#                 s.overlap <- rownames(data.cli.p)[data.cli.p$subjectnumber%in%nobf.id]
+#               }
+# 
+#               s.overlap <- as.character(s.overlap)
+#               data.cli.p.use <- data.cli.p[s.overlap,]
+#               otu.table.use <- as.matrix(otu_table(OTU.use))
+#               otu.table.sub <- otu.table.use[as.character(s.use),]
+# 
+#               if(visit%in%c("1m", "1y")){
+#                 rownames(otu.table.sub) <- s.use.subjectid
+#               }
+#               if(visit=="longitudinal"){
+#                 rownames(otu.table.sub) <- s.use
+#               }
+#               otu.table.sub <- otu.table.sub[s.overlap,]
+# 
+#               for(adj.race in c("none")){#"genetic",
+#                 if(adj.race=="none"){
+#                   adj.vars <- adj.vars.basic
+#                   used.vars.use <- used.vars[!used.vars%in%c(paste0("ethnicity_pc",1:3))]
+#                 }
+#                 if(bf.sub%in%c("AnyBF","NoBF")){
+#                   used.vars.bf <- used.vars.use[!used.vars.use%in%c("bf" ,"EBF_6m")]
+#                 }else{
+#                   used.vars.bf <- used.vars.use
+#                 }
+# 
+#                 adj.vars.model <- adj.vars
+#                 used.vars.model <- used.vars.bf
+# 
+#                 for(check.var in  used.vars.model){#c()
+#                   all.vars <- unique(c(check.var, adj.vars.model))
+#                   data.cli.p.nomissing <- na.omit(data.cli.p.use[,all.vars])
+# 
+#                   s.nomissing <- as.character(rownames(data.cli.p.nomissing))
+# 
+#                   data.cli.model <- data.cli.p.use[s.nomissing,]
+#                   otu.table.model <- otu.table.sub[s.nomissing,]
+#                   data.cli.model[,check.var] <- scale(as.numeric(as.character(data.cli.model[,check.var])))
+#                   data.cli.model.use <- data.cli.model
+#                   need.change.sp <- used.sp[!used.sp%in%colnames(otu.table.model)]
+#                   used.sp[used.sp%in%need.change.sp] <- paste0("X",used.sp[used.sp%in%need.change.sp])
+#                   otu.table.model.use <- otu.table.model[rownames(data.cli.model.use),used.sp]
+#                   otu.table.model.use <- na.omit(otu.table.model.use)
+#                   data.cli.model.use <- data.cli.model.use[rownames(otu.table.model.use),]
+#                   if(visit%in%c("1m", "1y")){
+#                     masslin.res  <- Maaslin2(
+#                       input_data = otu.table.model.use,
+#                       input_metadata = data.cli.model.use,
+#                       output = "Metagenomic",
+#                       normalization = norm.use,
+#                       transform = trans.use,
+#                       min_abundance = min.use,
+#                       min_prevalence = prev.use,
+#                       plot_heatmap = FALSE,
+#                       plot_scatter = FALSE,
+#                       fixed_effects = c(all.vars),
+#                       random_effects = "site")
+# 
+#                     res <- masslin.res$results
+#                     res <- subset(res)
+#                     res$N <- nrow(otu.table.model)
+#                     res$Model <- "SingleVisit"
+#                   }
+# 
+#                   if(visit%in%c("longitudinal")){
+# 
+#                     data.cli.model.use[,check.var] <- as.numeric(as.character(data.cli.model.use[,check.var]))
+#                     data.cli.model.use$time_interaction <- data.cli.model.use$exact_age*data.cli.model.use[,check.var]
+# 
+#                     masslin.res.long  <- Maaslin2(
+#                       input_data = otu.table.model.use,
+#                       input_metadata = data.cli.model.use,
+#                       output = "Metagenomic",
+#                       normalization = norm.use,
+#                       transform = trans.use,
+#                       min_abundance = min.use,
+#                       min_prevalence = prev.use,
+#                       plot_heatmap = FALSE,
+#                       plot_scatter = FALSE,
+#                       fixed_effects = all.vars,
+#                       random_effects = c("subjectnumber","site"))
+#                     masslin.res.long.int  <- Maaslin2(
+#                       input_data = otu.table.model.use,
+#                       input_metadata = data.cli.model.use,
+#                       output = "Metagenomic",
+#                       normalization = norm.use,
+#                       transform = trans.use,
+#                       min_abundance = min.use,
+#                       min_prevalence = prev.use,
+#                       plot_heatmap = FALSE,
+#                       plot_scatter = FALSE,
+#                       fixed_effects = c(all.vars,"time_interaction"),
+#                       random_effects = c("subjectnumber","site"))
+# 
+#                     res1 <- masslin.res.long$results
+#                     res2 <- masslin.res.long.int$results
+#                     res1$Model <- "Nointeract"
+#                     res2$Model <- "Interact"
+# 
+#                     res <- rbind(res1, res2)
+#                     res$N <- nrow(otu.table.model)
+#                   }
+# 
+#                   res.all <- res
+#                   res.all$check.var <- check.var
+#                   res.all$Data <- data.type
+#                   res.all$Visit <- visit
+#                   res.all$Race.Adj <- adj.race
+#                   res.all$BFsub <- bf.sub
+#                   res.all$adjbasic <- paste(adj.vars.basic, collapse = " + ")
+#                   res.all$Normalization <- norm.method
+#                   res.all$Prevalence_cutoff <- prev.ct
+#                   SES.maaslin <- rbind(SES.maaslin, res.all)
+#                   save(SES.maaslin, file="Maaslin2 Results.RData")
+# 
+#                 }
+#               }
+#             }
+#           }
+#         }
+#       }
+#     }
+#   }
+# }
+load("Maaslin2 Results.RData")
+
+```
+
+
+## Summarize the results from MAaslin2 analysis
+```{r, warning=FALSE, results = 'hide', message=FALSE}
+SES.maaslin.combine <- unique(SES.maaslin)
+######################################################################
+#Combine the models with and without interaction. If slope not significant (p-value > 0.05), use the models without interaction.  
+qval.ct <- 0.1
+exclude.val <- c("toronto","vancouver","winnipeg","square_age","exact_age","ProcessingPeriod","1")
+check.var.use <- unique(SES.maaslin.combine$check.var)
+
+SES.masslin.all <- NULL
+adj.vars.basics <- list(c("ProcessingPeriod", "exact_age","site"))
+for(BFsub.use in c("All","AnyBF","NoBF")){
+  for(adj.vars.basic.use in unique(SES.maaslin.combine$adjbasic)){
+    for(norm.use in c("MCLR")){
+      SES.masslin.new <- subset(SES.maaslin.combine,   BFsub==BFsub.use & Race.Adj=="none" & 
+                                  Normalization==norm.use & adjbasic==adj.vars.basic.use &
+                                  Visit=="longitudinal" & Data=="Species" & Prevalence_cutoff==0.1)
+      for(check.var.i in check.var.use){
+        ses.sp.int <- subset(SES.masslin.new, check.var%in%check.var.i & value%in%c("time_interaction") & !value%in%exclude.val & Model=="Interact" )
+        ses.sp.main <-  subset(SES.masslin.new, check.var%in%check.var.i & !value%in%exclude.val & Model=="Nointeract" )
+        ff.no.int <- subset(ses.sp.int, pval>=0.05)
+        ff.sig.int <-  subset(ses.sp.int, pval<0.05)
+        
+        ses.sp.int.all <-  subset(SES.masslin.new, check.var%in%check.var.i & value%in%c("time_interaction",check.var.i,"exact_age") &
+                                    Model=="Interact" )
+        ses.sp.main.all <- subset(SES.masslin.new, check.var%in%check.var.i & value%in%c(check.var.i,"exact_age")  & Model=="Nointeract")
+        ses.new.i <- rbind(ses.sp.int.all,
+                           ses.sp.main.all)
+        SES.masslin.all <- rbind(SES.masslin.all, ses.new.i)
+      }
+    }
+  }
+}
+SES.masslin.all$feature_update <- strsplit2(SES.masslin.all$feature,"__")[,1]
+dup.name <- strsplit2(unique(SES.masslin.all$feature),"__")[,1][duplicated(strsplit2(unique(SES.masslin.all$feature),"__")[,1])]
+SES.masslin.all$feature_update[SES.masslin.all$feature_update %in%dup.name] <- SES.masslin.all$feature[SES.masslin.all$feature_update %in%dup.name] 
+SES.masslin.all$feature_update <- gsub("  "," ",gsub("_"," ",SES.masslin.all$feature_update))
+SES.masslin.all <- unique(SES.masslin.all)
+
+SES.masslin.all.use <- subset(SES.masslin.all, Normalization=="MCLR" & BFsub=="All" &
+                                adjbasic=="ProcessingPeriod + exact_age" )
+
+######################################################################
+
+######################################################################
+#Longitudinal analysis results for SES
+check.var.use <- c("MR1_latent.raw")
+#Species associated with SES
+ses.sp.int <- subset(SES.masslin.all.use,
+                     qval<qval.ct & check.var%in%check.var.use & value%in%c("time_interaction"))
+ses.sp.main <- subset(SES.masslin.all.use, Model%in%"Nointeract"&
+                      qval<qval.ct & check.var%in%check.var.use & value%in%c(check.var.use) & !value%in%exclude.val)
+ses.sig.f <- unique(c(ses.sp.int$feature))
+ses.sp.main <- unique(ses.sp.main$feature)[!unique(ses.sp.main$feature)%in%ses.sig.f]
+ses.sp.long <- subset(SES.masslin.all.use, check.var%in%check.var.use & feature%in%unique(c(ses.sig.f,ses.sp.main)))
+
+#Create the pattern of change
+ses.sp.long.pattern <- ses.sp.long
+ses.sp.long.pattern$coef[ses.sp.long.pattern$qval>0.1 &ses.sp.long.pattern$value!="exact_age" ] <- 0
+sp.increase <- subset(SES.masslin.all.use, value=="exact_age" & coef>0 & check.var%in%check.var.use & Model=="Interact")$feature
+sp.decrease <- subset(SES.masslin.all.use, value=="exact_age" & coef<0 & check.var%in%check.var.use & Model=="Interact")$feature
+
+pattern.type <- dcast(ses.sp.long.pattern[,c("feature","value","coef","Model")], Model+ feature ~ value, value.var = c("coef"))
+pattern.type <- pattern.type[order(pattern.type$Model),]
+
+pattern.type$time_trend <- ifelse(pattern.type$exact_age>0,"Increase",
+                                  ifelse(pattern.type$exact_age<0,"Decrease","No change"))
+pattern.type$slope_SES <- ifelse(is.na(pattern.type$time_interaction),"No change",
+                                 ifelse(pattern.type$time_interaction>0,"High",
+                                        ifelse(pattern.type$time_interaction<0,"Low","No change")))
+pattern.type$baseline_SES <- ifelse(pattern.type$MR1_latent.raw>0,"High",
+                                    ifelse(pattern.type$MR1_latent.raw<0,"Low","No change"))
+pattern.type.1 <- subset(pattern.type,slope_SES=="No change" & feature%in%ses.sp.main & Model=="Nointeract")
+pattern.type.2 <- subset(pattern.type,slope_SES!="No change" & feature%in%ses.sig.f & Model=="Interact")
+pattern.type <- rbind(pattern.type.1,pattern.type.2)
+pattern.type$pattern <- ifelse(pattern.type$slope_SES=="No change", paste(pattern.type$time_trend, pattern.type$baseline_SES),
+                                paste(pattern.type$time_trend, pattern.type$baseline_SES, pattern.type$slope_SES, sep="_"))
+ 
+table(pattern.type$pattern)
+
+
+ses.sp.long <- merge(ses.sp.long, pattern.type[,c("feature","pattern")], by="feature",all.x=T)
+ses.sp.long$sig <- ifelse(ses.sp.long$qval<0.1,"sig","nosig")
+ses.sp.long$Effect <- ifelse(ses.sp.long$value=="MR1_latent.raw"& ses.sp.long$Model=="Interact", "Baseline", 
+                             ifelse(ses.sp.long$value=="MR1_latent.raw"& ses.sp.long$Model=="Nointeract", "Overall", 
+                                    ifelse(ses.sp.long$value=="time_interaction", "Slope","Time")))
+table(ses.sp.long$pattern)
+ses.sp.long$pattern <- factor(ses.sp.long$pattern, levels=c("Increase High" ,
+                                                            "Increase Low" ,
+                                                          
+                                                            "Increase_No change_High",
+                                                            "Increase_No change_Low",
+                                                            
+                                                            "Increase_Low_High"  ,
+                                                            "Increase_High_Low" ,
+                                                            
+                                                              "Decrease Low",
+                                                             "Decrease_Low_High" ,
+                                                             "Decrease_High_Low"),
+                              ordered=T)
+
+ses.sp.long$Direction <- ifelse(ses.sp.long$coef>0,"Positive","Negative")
+sp.order.ses <- ses.sp.long[ses.sp.long$value=="MR1_latent.raw",]
+sp.order.ses <- sp.order.ses[order(abs(sp.order.ses$coef)),]
+sp.order.ses <- sp.order.ses[order(sp.order.ses$Model,decreasing=F),]
+ses.sp.long$feature_update <- factor(ses.sp.long$feature_update,levels=unique(sp.order.ses$feature_update), ordered=T)
+ses.sp.long$Effect <- factor(ses.sp.long$Effect, levels=c("Baseline","Slope","Overall","Time"), ordered=T)
+ses.sp.long$Model <- ifelse(ses.sp.long$Model=="Interact","Model with interaction", "Model without interaction")
+ses.sp.long$pattern[is.na(ses.sp.long$pattern)] <- "Increase_Low_High"
+ses.plot <- ggplot(subset(ses.sp.long ,Effect !="Time" ), 
+                   aes(x=coef, y=feature_update,fill=Direction,alpha=sig)) + 
+  theme_bw() + 
+  xlab("Coefficient") +
+  geom_errorbar(aes(xmin=coef-1.96*stderr,xmax=coef+1.96*stderr), width=.2, position=position_dodge(0.5)) +
+  geom_point(position=position_dodge(0.5), size = 3, pch = 21) +
+  facet_grid(pattern~Model+Effect,scale="free_y",space="free_y") +
+  ylab("") + ggtitle("") +
+  xlab("") + xlab("MaAsLin2 coefficient") + ylab("") +
+  scale_shape_manual(values=seq(0,10)) +
+  scale_fill_manual(values = c( 
+    "black","black"  ))+ 
+  scale_alpha_discrete(range = c(0.5,1))+
+  geom_vline(xintercept=0)
+pdf("Figures/Fig S4 Maaslin2 Species SES.pdf", height=8, width=10)
+plot(ses.plot)
+dev.off()
+sig.sp.ses <- unique(ses.sp.long$feature)
+```
+
+
+### Generate figure of species assocaited with SES (Figure S4A)
+```{r, echo=T,out.width="120%"}
+plot(ses.plot)
+```
+
+### Generate heatmap of associaiton between SES, bf and microbiome (Figure S4B)
+```{r, echo=T, message=F, warning=F}
+ff.order <- c(layer_scales(ses.plot, 1, 2)$y$range$range,
+              layer_scales(ses.plot, 2, 2)$y$range$range,
+              layer_scales(ses.plot, 3, 2)$y$range$range,
+              layer_scales(ses.plot, 4, 2)$y$range$range,
+              layer_scales(ses.plot, 5, 2)$y$range$range,
+              layer_scales(ses.plot, 6, 2)$y$range$range)
+
+######################################################################
+#Longitudinal analysis results for SES & early life factors
+################################################################################
+check.var.use <- unique(SES.maaslin.combine$check.var)
+
+used.vars <- c("MR1_latent.raw","bf")
+
+ses.sig.f.all <- unique(c(ses.sp.main,ses.sig.f))
+all.sp <- subset(SES.masslin.all.use, !value%in%exclude.val & feature%in%ses.sig.f.all & check.var%in%used.vars)
+all.sp$U <- ifelse(all.sp$qval<0.1,"*","")
+
+
+all.sp$Effect <- ifelse(all.sp$value=="time_interaction","Slope",
+                        ifelse(all.sp$Model=="Interact", "Baseline",
+                                ifelse(all.sp$Model=="Nointeract", "Overall",NA)))
+all.sp <- merge(all.sp, pattern.type[,c("feature","pattern")], by="feature")
+all.sp$pattern <- factor(all.sp$pattern, levels=c("Increase High" ,
+                                                            "Increase Low" ,
+                                                          
+                                                            "Increase_No change_High",
+                                                            "Increase_No change_Low",
+                                                            
+                                                            "Increase_Low_High"  ,
+                                                            "Increase_High_Low" ,
+                                                            
+                                                              "Decrease Low",
+                                                             "Decrease_Low_High" ,
+                                                             "Decrease_High_Low"), ordered=T)
+
+all.sp <- merge(all.sp, data.map, by.x="check.var", by.y="Vars",all.x=T)
+all.sp.use <- subset(all.sp, Category!="Health")
+all.sp.use$Category <- factor(all.sp.use$Category, levels=c("SES","Pregnancy",
+                                                            "Birth",
+                                                            "Postnatal",
+                                                            "Home Environment",
+                                                            "Neighbourhood Environment",
+                                                            "Parental Diet/Health"),
+                              ordered=T)
+all.sp.use$Effect <- factor(all.sp.use$Effect, levels=c("Baseline", "Slope","Overall"), ordered=T)
+all.sp.use$feature_update <- factor(all.sp.use$feature_update,
+                                    levels=c(ff.order), ordered=T)
+```
+
+```{r, echo=T,out.width="120%"}
+######################################################################
+#Supplementary figure
+all.sp.use$Label <- factor(all.sp.use$Label, levels=unique(all.sp.use$Label), ordered=T)
+
+gg3 <- ggplot(subset(all.sp.use,Effect%in%c("Overall","Slope") & check.var%in%c("MR1_latent.raw", "bf")), 
+             aes(y=feature_update, x=Label)) +
+  geom_tile(aes(fill=coef)) +
+  geom_text(aes(label = U), color = "white", size = 4) +
+  scale_fill_continuous_divergingx(palette = 'RdBu', mid = 0, l3 = 0, p1=0.5,p2=0.4,p3 = .1, p4 = .5,
+                                   name="Coefficient",rev = T, na.value = "white") +
+  theme_bw() + ylab("") + xlab("")+ theme(legend.position="bottom") +
+  facet_grid(pattern~Category+Effect,scales = "free",space = "free") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+
+pdf("Figures/Fig S4b Maaslin2 Species BF SES.pdf", height=9, width=9)
+plot(gg3)
+dev.off()
+plot(gg3)
+```
+
+## Generate the B.infantis prevalence from COPSAC (Table S2)
+```{r, echo=T,out.width="120%"}
+data.div <- data.frame(sample_data(RBCOPSAC_species)[,c("SampleID", "abcno",   "Timepoint", "exact_age","shipment_date","Observed", "Shannon", "Chao")])
+data.div <- data.div[!(data.div$abcno=="2105" & data.div$Timepoint=="1y"),]
+data.div <- subset(data.div, exact_age<1.5)
+data.div <- subset(data.div, shipment_date<4.167)
+rownames(data.div) <- data.div$SampleID
+data.div$ProcessingPeriod <- data.div$shipment_date
+table(data.div$Timepoint)
+data.div$Visit <- data.div$Timepoint
+data.div$SubjectNumber <- data.div$abcno
+
+sample_data(RBCOPSAC_species) <- data.div
+
+#Cutoff used to define the the RB > prev.cutoff as present.
+prev.cutoff <- 0
+
+rela_species<-as.data.frame(otu_table(t(RBCOPSAC_species)))
+prev_species<-rela_species
+prev_species[prev_species>prev.cutoff]<-1
+
+bifido <- grepl("Bifidobacterium", names(prev_species))
+prev_bif <- prev_species[, bifido]
+names(prev_bif)[names(prev_bif)=="Bifidobacterium_longum_subsp.infantis"]<-"Bifidobacterium_infantis"
+names(prev_bif) <- gsub(" .*", "", names(prev_bif))
+
+metadata<-as.data.frame(sample_data(RBCOPSAC_species))
+SampleID1m<-subset(metadata, Timepoint=="1m")$SampleID
+SampleID1y<-subset(metadata, Timepoint=="1y")$SampleID
+COPSAC.rb.1y <- rela_species[SampleID1y,"Bifidobacterium_longum_subsp.infantis"]
+COPSAC.rb.1y <- data.frame(SampleID=SampleID1y, RB=COPSAC.rb.1y, Cohort="COPSAC")
+
+COPSAC.rb.1m <- rela_species[SampleID1m,"Bifidobacterium_longum_subsp.infantis"]
+COPSAC.rb.1m <- data.frame(SampleID=SampleID1m, RB=COPSAC.rb.1m, Cohort="COPSAC")
+
+
+
+
+prev_bif.1m<-prev_bif[rownames(prev_bif) %in% SampleID1m,]
+colnames(prev_bif.1m) <- paste(colnames(prev_bif.1m),"1m",sep="_") 
+rownames(prev_bif.1m)<-metadata$abcno[match(rownames(prev_bif.1m),metadata$SampleID)]
+
+prev_bif.1y<-prev_bif[rownames(prev_bif) %in% SampleID1y,]
+colnames(prev_bif.1y) <- paste(colnames(prev_bif.1y),"1y",sep="_") 
+rownames(prev_bif.1y)<-metadata$abcno[match(rownames(prev_bif.1y),metadata$SampleID)]
+
+prev_bif<-merge(prev_bif.1m,prev_bif.1y, all=TRUE, by="row.names")
+
+
+
+data.microbiota<-merge(data.withmissing, prev_bif, by.x="subjectnumber", by.y="Row.names")
+data.microbiota$Bifidobacterium_bifidum_any<-ifelse(data.microbiota$Bifidobacterium_bifidum_SGB17256_1m | data.microbiota$Bifidobacterium_bifidum_SGB17256_1y==1,1,0)
+data.microbiota$Bifidobacterium_dentium_any<-ifelse(data.microbiota$Bifidobacterium_dentium_SGB17234_1m | data.microbiota$Bifidobacterium_dentium_SGB17234_1y==1,1,0)
+data.microbiota$Bifidobacterium_adolescentis_any<-ifelse(data.microbiota$Bifidobacterium_adolescentis_SGB17244_1m | data.microbiota$Bifidobacterium_adolescentis_SGB17244_1y==1,1,0)
+data.microbiota$Bifidobacterium_breve_any<-ifelse(data.microbiota$Bifidobacterium_breve_SGB17247_1m | data.microbiota$Bifidobacterium_breve_SGB17247_1y==1,1,0)
+data.microbiota$Bifidobacterium_infantis_any<-ifelse(data.microbiota$Bifidobacterium_infantis_1m | data.microbiota$Bifidobacterium_infantis_1y==1,1,0)
+data.microbiota$Bifidobacterium_catenulatum_any<-ifelse(data.microbiota$Bifidobacterium_catenulatum_SGB17241_1m | data.microbiota$Bifidobacterium_catenulatum_SGB17241_1y==1,1,0)
+data.microbiota$Bifidobacterium_pseudocatenulatum_any<-ifelse(data.microbiota$Bifidobacterium_pseudocatenulatum_SGB17237_1m | data.microbiota$Bifidobacterium_pseudocatenulatum_SGB17237_1y==1,1,0)
+data.microbiota$Bifidobacterium_longum_any<-ifelse(data.microbiota$Bifidobacterium_longum_noninfantissubsp_1m | data.microbiota$Bifidobacterium_longum_noninfantissubsp_1y==1,1,0)
+
+
+rb_bif <- rela_species
+rb_bif.1m<-rb_bif[rownames(rb_bif) %in% SampleID1m,]
+colnames(rb_bif.1m) <- paste(colnames(rb_bif.1m),"1m_rb",sep="_") 
+rownames(rb_bif.1m)<-metadata$abcno[match(rownames(rb_bif.1m),metadata$SampleID)]
+
+rb_bif.1y<-rb_bif[rownames(rb_bif) %in% SampleID1y,]
+colnames(rb_bif.1y) <- paste(colnames(rb_bif.1y),"1y_rb",sep="_") 
+rownames(rb_bif.1y)<-metadata$abcno[match(rownames(rb_bif.1y),metadata$SampleID)]
+
+rb_bif<-merge(rb_bif.1m,rb_bif.1y, all=TRUE, by="row.names")
+
+
+data.microbiota<-merge(merge(data.microbiota,rb_bif, by.x="subjectnumber", by.y="Row.names"),
+                       merge(data.frame(metadata[SampleID1m,c("SubjectNumber","exact_age","ProcessingPeriod")]),
+                             data.frame(metadata[SampleID1y,c("SubjectNumber","exact_age","ProcessingPeriod")]),by="SubjectNumber",all=T,suffix=c(".1m",".1y")), by.x="subjectnumber", by.y="SubjectNumber")
+
+
+data.microbiota$bf <- ifelse(data.microbiota$bf_duration_imp>data.microbiota$exact_age.1y,1,0)
+
+bifido<-grepl("_any", names(data.microbiota))
+
+bifido_string<-names(data.microbiota[,bifido])
+bifido_string <- bifido_string[-1]
+
+# for (i in bifido_string) { print(table(data.microbiota[[i]]))}
+
+# Initialize an empty data frame to store results
+# Load library for confidence intervals (optional, for convenience)
+
+data.microbiota.bf<-subset(data.microbiota,bf_duration_imp>=3)
+
+# Initialize results data frame
+results_df <- data.frame(
+  Species = character(),
+  Site = character(),
+  AvgPrevalence = numeric(),
+  CI_Lower = numeric(),
+  CI_Upper = numeric()
+)
+data.microbiota.bf$site <- "COPSAC"
+
+# Loop through each species
+for (species in bifido_string) {
+  # Calculate average prevalence and CI per site
+  site_summary <- aggregate(
+    data.microbiota.bf[[species]], 
+    by = list(Site = data.microbiota.bf$site), 
+    FUN = function(x) {
+      n <- length(x)                # Total samples per site
+      k <- sum(x, na.rm = TRUE)     # Successes (1s) per site
+      p_hat <- mean(x, na.rm = TRUE) # Average prevalence
+      
+      # Calculate 95% CI using Wilson method
+      ci <- binom::binom.confint(k, n, method = "wilson")
+      
+      c(AvgPrevalence = p_hat, CI_Lower = ci$lower, CI_Upper = ci$upper)
+    }
+  )
+  
+  # Reshape the results
+  site_summary <- do.call(data.frame, site_summary)
+  colnames(site_summary)[2:4] <- c("AvgPrevalence", "CI_Lower", "CI_Upper")
+  site_summary$Species <- species
+  
+  # Calculate overall prevalence across all sites
+  total_n <- nrow(data.microbiota.bf)
+  total_k <- sum(data.microbiota.bf[[species]], na.rm = TRUE)
+  overall_p_hat <- mean(data.microbiota.bf[[species]], na.rm = TRUE)
+  
+  # Calculate 95% CI for overall prevalence
+  overall_ci <- binom::binom.confint(total_k, total_n, method = "wilson")
+  
+  # Add overall prevalence row
+  overall_row <- data.frame(
+    Species = species,
+    Site = "Overall",
+    AvgPrevalence = overall_p_hat,
+    CI_Lower = overall_ci$lower,
+    CI_Upper = overall_ci$upper
+  )
+  
+  # Combine site summary with overall row
+  site_summary <- rbind(site_summary, overall_row)
+  
+  # Append to the results data frame
+  results_df <- rbind(results_df, site_summary)
+}
+
+# View the results
+results_df_COPSAC <- results_df
+data.microbiota.bf.COPSAC <- data.microbiota.bf
+
+```
+
+## Generate the B.infantis prevalence from CHILD
+```{r, echo=T,out.width="120%"}
+load("~/Desktop/SES/Results/manuscript/Code/Results/P1 Processed Metagenomic data.RData")
+
+rela_species<-as.data.frame(otu_table(RBNME_species))
+prev_species<-rela_species
+prev_species[prev_species>prev.cutoff]<-1
+
+bifido <- grepl("Bifidobacterium", names(prev_species))
+prev_bif <- prev_species[, bifido]
+names(prev_bif)[names(prev_bif)=="Bifidobacterium_longum subsp.infantis"]<-"Bifidobacterium_infantis"
+names(prev_bif) <- gsub(" .*", "", names(prev_bif))
+
+metadata<-as.data.frame(sample_data(RBNME_species))
+SampleID3m<-subset(metadata, Visit=="3 month")$SampleID
+SampleID1y<-subset(metadata, Visit=="1 year")$SampleID
+
+
+CHILD.rb.1y <- rela_species[SampleID1y,"Bifidobacterium_longum subsp.infantis"]
+CHILD.rb.1y <- data.frame(SampleID=SampleID1y, RB=CHILD.rb.1y, Cohort="CHILD")
+
+CHILD.rb.3m <- rela_species[SampleID3m,"Bifidobacterium_longum subsp.infantis"]
+CHILD.rb.3m <- data.frame(SampleID=SampleID3m, RB=CHILD.rb.3m, Cohort="CHILD")
+
+Combine.rb.1y <- rbind(CHILD.rb.1y,COPSAC.rb.1y)
+Combine.rb.1m <- rbind(CHILD.rb.3m,COPSAC.rb.1m)
+
+
+prev_bif.3m<-prev_bif[rownames(prev_bif) %in% SampleID3m,]
+colnames(prev_bif.3m) <- paste(colnames(prev_bif.3m),"3m",sep="_") 
+rownames(prev_bif.3m)<-metadata$SubjectNumber[match(rownames(prev_bif.3m),metadata$SampleID)]
+
+prev_bif.1y<-prev_bif[rownames(prev_bif) %in% SampleID1y,]
+colnames(prev_bif.1y) <- paste(colnames(prev_bif.1y),"1y",sep="_") 
+rownames(prev_bif.1y)<-metadata$SubjectNumber[match(rownames(prev_bif.1y),metadata$SampleID)]
+
+prev_bif<-merge(prev_bif.3m,prev_bif.1y, all=TRUE, by="row.names")
+data.microbiota<-merge(data.withmissing, prev_bif, by.x="subjectnumber", by.y="Row.names")
+data.microbiota$site<-relevel(data.microbiota$site, ref = "winnipeg")
+data.microbiota$Bifidobacterium_bifidum_any<-ifelse(data.microbiota$Bifidobacterium_bifidum_3m | data.microbiota$Bifidobacterium_bifidum_1y==1,1,0)
+data.microbiota$Bifidobacterium_dentium_any<-ifelse(data.microbiota$Bifidobacterium_dentium_3m | data.microbiota$Bifidobacterium_dentium_1y==1,1,0)
+data.microbiota$Bifidobacterium_longum_any<-ifelse(data.microbiota$Bifidobacterium_longum_3m | data.microbiota$Bifidobacterium_longum_1y==1,1,0)
+data.microbiota$Bifidobacterium_pseudocatenulatum_any<-ifelse(data.microbiota$Bifidobacterium_pseudocatenulatum_3m | data.microbiota$Bifidobacterium_pseudocatenulatum_1y==1,1,0)
+data.microbiota$Bifidobacterium_adolescentis_any<-ifelse(data.microbiota$Bifidobacterium_adolescentis_3m | data.microbiota$Bifidobacterium_adolescentis_1y==1,1,0)
+data.microbiota$Bifidobacterium_breve_any<-ifelse(data.microbiota$Bifidobacterium_breve_3m | data.microbiota$Bifidobacterium_breve_1y==1,1,0)
+data.microbiota$Bifidobacterium_infantis_any<-ifelse(data.microbiota$Bifidobacterium_infantis_3m | data.microbiota$Bifidobacterium_infantis_1y==1,1,0)
+data.microbiota$Bifidobacterium_animalis_any<-ifelse(data.microbiota$Bifidobacterium_animalis_3m | data.microbiota$Bifidobacterium_animalis_1y==1,1,0)
+data.microbiota$atbx.1y<-as.numeric(as.character(data.microbiota$atbx.1y))
+data.microbiota$postnatal_smoke<-as.numeric(as.character(data.microbiota$postnatal_smoke))
+data.microbiota$awayhome1h_1y<-as.numeric(as.character(data.microbiota$awayhome1h_1y))
+data.microbiota$atbx.m.birth<-as.numeric(as.character(data.microbiota$atbx.m.birth))
+data.microbiota$older_siblings<-ifelse(data.microbiota$num_siblings > 0, 1, 0)
+bifido<-grepl("_any", names(data.microbiota))
+
+
+rb_bif <- rela_species
+rb_bif.3m<-rb_bif[rownames(rb_bif) %in% SampleID3m,]
+colnames(rb_bif.3m) <- paste(colnames(rb_bif.3m),"3m_rb",sep="_") 
+rownames(rb_bif.3m)<-metadata$SubjectNumber[match(rownames(rb_bif.3m),metadata$SampleID)]
+
+rb_bif.1y<-rb_bif[rownames(rb_bif) %in% SampleID1y,]
+colnames(rb_bif.1y) <- paste(colnames(rb_bif.1y),"1y_rb",sep="_") 
+rownames(rb_bif.1y)<-metadata$SubjectNumber[match(rownames(rb_bif.1y),metadata$SampleID)]
+
+rb_bif<-merge(rb_bif.3m,rb_bif.1y, all=TRUE, by="row.names")
+
+
+data.microbiota<-merge(merge(data.microbiota,rb_bif, by.x="subjectnumber", by.y="Row.names"),
+                       merge(data.frame(metadata[SampleID3m,c("SubjectNumber","exact_age","ProcessingPeriod")]),
+                             data.frame(metadata[SampleID1y,c("SubjectNumber","exact_age","ProcessingPeriod")]),by="SubjectNumber",all=T,suffix=c(".3m",".1y")),
+                       by.x="subjectnumber", by.y="SubjectNumber")
+
+enrich.rb <- 0
+
+data.microbiota$Binfantis.enrich.3m <- ifelse(data.microbiota$`Bifidobacterium_longum non infantis subsp_3m_rb`>enrich.rb,1,0)
+data.microbiota$Binfantis.enrich.1y <- ifelse(data.microbiota$`Bifidobacterium_longum subsp.infantis_1y_rb`>enrich.rb,1,0)
+data.microbiota$Binfantis.enrich <- ifelse(data.microbiota$`Bifidobacterium_longum subsp.infantis_1y_rb`>enrich.rb|
+                                             data.microbiota$`Bifidobacterium_longum non infantis subsp_3m_rb`>enrich.rb,1,0)
+
+bifido<-grepl("_any", names(data.microbiota))
+bifido_string<-names(data.microbiota[,bifido])
+
+# for (i in bifido_string) { print(table(data.microbiota[[i]]))}
+
+# Initialize an empty data frame to store results
+# Load library for confidence intervals (optional, for convenience)
+data.microbiota.bf<-subset(data.microbiota,bf_duration_imp>=3)
+
+# Initialize results data frame
+results_df <- data.frame(
+  Species = character(),
+  Site = character(),
+  AvgPrevalence = numeric(),
+  CI_Lower = numeric(),
+  CI_Upper = numeric()
+)
+
+# Loop through each species
+for (species in bifido_string) {
+  # Calculate average prevalence and CI per site
+  site_summary <- aggregate(
+    data.microbiota.bf[[species]], 
+    by = list(Site = data.microbiota.bf$site), 
+    FUN = function(x) {
+      n <- length(x)                # Total samples per site
+      k <- sum(x, na.rm = TRUE)     # Successes (1s) per site
+      p_hat <- mean(x, na.rm = TRUE) # Average prevalence
+      
+      # Calculate 95% CI using Wilson method
+      ci <- binom::binom.confint(k, n, method = "wilson")
+      
+      c(AvgPrevalence = p_hat, CI_Lower = ci$lower, CI_Upper = ci$upper)
+    }
+  )
+  
+  # Reshape the results
+  site_summary <- do.call(data.frame, site_summary)
+  colnames(site_summary)[2:4] <- c("AvgPrevalence", "CI_Lower", "CI_Upper")
+  site_summary$Species <- species
+  
+  # Calculate overall prevalence across all sites
+  total_n <- nrow(data.microbiota.bf)
+  total_k <- sum(data.microbiota.bf[[species]], na.rm = TRUE)
+  overall_p_hat <- mean(data.microbiota.bf[[species]], na.rm = TRUE)
+  
+  # Calculate 95% CI for overall prevalence
+  overall_ci <- binom::binom.confint(total_k, total_n, method = "wilson")
+  
+  # Add overall prevalence row
+  overall_row <- data.frame(
+    Species = species,
+    Site = "Overall",
+    AvgPrevalence = overall_p_hat,
+    CI_Lower = overall_ci$lower,
+    CI_Upper = overall_ci$upper
+  )
+  
+  # Combine site summary with overall row
+  site_summary <- rbind(site_summary, overall_row)
+  
+  # Append to the results data frame
+  results_df <- rbind(results_df, site_summary)
+}
+
+#Chi-square test for CHILD cohort (Figure 6)##############################################
+#just run a chi-square
+chisq_df <- data.frame(
+  Species = character(),
+  ChiSquare = numeric(),
+  DF = numeric(),
+  PValue = numeric()
+)
+
+# Loop through each species
+for (species in bifido_string) {
+  # Create a contingency table: site x presence/absence
+  contingency_table <- table(data.microbiota.bf$site, data.microbiota.bf[[species]])
+  
+  # Perform chi-square test
+  chi_test <- chisq.test(contingency_table)
+  
+  # Store the results
+  chisq_df <- rbind(chisq_df, data.frame(
+    Species = species,
+    ChiSquare = chi_test$statistic,
+    DF = chi_test$parameter,
+    chisq_PValue = chi_test$p.value
+  ))
+}
+chisq_df$FDR <- p.adjust(chisq_df$chisq_PValue, method = "fdr")
+# View the results
+chisq_df$chisq_sig<-ifelse(chisq_df$FDR<0.001,"***",
+                           ifelse(chisq_df$FDR<0.01, "**",
+                              ifelse(chisq_df$FDR<0.05, "*",    "ns")))
+
+merged_df<-merge(results_df,chisq_df, by="Species")
+merged_df$Site<-factor(merged_df$Site, levels = c("Overall", "vancouver", "edmonton", "winnipeg", "toronto"))
+
+
+
+ggplot(data = subset(merged_df, !Species %in% c("atbx.1y", "EBF_6m", "postnatal_smoke", "older_siblings","awayhome1h_1y","atbx.m.birth")), aes(x=AvgPrevalence, y=reorder(Species,AvgPrevalence), fill=reorder(Species,AvgPrevalence)))+
+  geom_bar(stat="identity")+
+  geom_text(aes(label=round(AvgPrevalence,2)*100), position = position_stack(vjust = 0.5))+
+  facet_wrap(~Site, nrow  = 1)+
+  scale_fill_manual(values = rev(c("#0377a8", "#118fb0","#1fa6b8","#3ec4d6","#51ccd1","#63d4cc","#8be8d7","#b4fadc")))+
+  theme_pubr()+
+  theme(legend.position = "none")
+
+
+bb.prev <- cbind(subset(merged_df, Site=="vancouver", select=c("Species","AvgPrevalence")),
+subset(merged_df, Site=="toronto", select=c("AvgPrevalence")),
+subset(merged_df, Site=="winnipeg", select=c("AvgPrevalence")),
+subset(merged_df, Site=="edmonton", select=c("AvgPrevalence")),
+subset(merged_df, Site=="Overall", select=c("AvgPrevalence","FDR")))
+colnames(bb.prev) <- c("Species","Vancouver", "Toronto", "Winnipeg", "Edmonton", "CHILD Cohort","FDR")
+bb.prev
+write.csv(bb.prev, "Bifidobacterium species.csv")
+
+
+#Chi-square test for CHILD & COPSAC cohort (Figure S4)##############################################
+
+results_df_CHILD <- results_df
+B.sp.comb <- intersect(unique(results_df_CHILD$Species),unique(results_df_COPSAC$Species))
+res.combine <- rbind(subset(results_df_COPSAC,Site=="COPSAC" & Species%in%B.sp.comb),subset(results_df_CHILD,Site=="Overall"& Species%in%B.sp.comb))
+
+
+#just run a chi-square
+chisq_df <- data.frame(
+  Species = character(),
+  ChiSquare = numeric(),
+  DF = numeric(),
+  PValue = numeric()
+)
+
+data.microbiota.bf.CHILD <- data.microbiota.bf
+
+data.microbiota.bf.CHILD$Cohort <- "CHILD"
+data.microbiota.bf.COPSAC$Cohort <- "COPSAC"
+data.microbiota.bf.COPSAC$site <- "copsac"
+data.microbiota.bf.combine <- rbind(data.microbiota.bf.CHILD[,c("Cohort","site","subjectnumber",B.sp.comb)],
+                                    data.microbiota.bf.COPSAC[,c("Cohort","site","subjectnumber",B.sp.comb)])
+
+# Loop through each species
+for (species in B.sp.comb) {
+  # Create a contingency table: site x presence/absence
+  contingency_table <- table(data.microbiota.bf.combine$Cohort, data.microbiota.bf.combine[[species]])
+  
+  # Perform chi-square test
+  chi_test <- chisq.test(contingency_table)
+  
+  # Store the results
+  chisq_df <- rbind(chisq_df, data.frame(
+    Species = species,
+    ChiSquare = chi_test$statistic,
+    DF = chi_test$parameter,
+    chisq_PValue = chi_test$p.value
+  ))
+}
+chisq_df$FDR <- p.adjust(chisq_df$chisq_PValue, method = "fdr")
+
+# View the results
+chisq_df$chisq_sig <- ifelse(chisq_df$FDR<0.001,"***",
+                           ifelse(chisq_df$FDR<0.01, "**",
+                                  ifelse(chisq_df$FDR<0.05, "*",    "ns")))
+
+merged_df<-merge(res.combine,chisq_df, by="Species")
+merged_df$Site[merged_df$Site=="Overall"] <- "CHILD"
+merged_df$Site<-factor(merged_df$Site, levels = c("CHILD", "COPSAC"))
+
+
+ggplot(data = subset(merged_df, !Species %in% c("atbx.1y", "EBF_6m", "postnatal_smoke", "older_siblings","awayhome1h_1y","atbx.m.birth")), aes(x=AvgPrevalence, y=reorder(Species,AvgPrevalence), fill=reorder(Species,AvgPrevalence)))+
+  geom_bar(stat="identity")+
+  geom_text(aes(label=round(AvgPrevalence,2)*100), position = position_stack(vjust = 0.5))+
+  facet_wrap(~Site, nrow  = 1)+
+  scale_fill_manual(values = rev(c("#0377a8", "#118fb0","#1fa6b8","#3ec4d6","#51ccd1","#63d4cc","#8be8d7","#b4fadc")))+
+  theme_pubr()+
+  theme(legend.position = "none")
+
+
+bb.prev <- cbind(subset(merged_df, Site=="CHILD", select=c("Species","AvgPrevalence")),
+                 subset(merged_df, Site=="COPSAC", select=c("AvgPrevalence","FDR")))
+colnames(bb.prev) <- c("Species","CHILD", "COPSAC","FDR")
+write.csv(bb.prev, "Bifidobacterium species copsac.csv")
+bb.prev
+
+
+```

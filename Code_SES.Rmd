@@ -1,7 +1,7 @@
 ---
-title: "SES and Microbiome code"
+title: "SES and Microbiome code (CHILD Cohort)"
 author: "Darlene Dai"
-date: "2024-10-28"
+date: "2025-07-11"
 output: html_document
 ---
 
@@ -14,17 +14,40 @@ knitr::opts_chunk$set(echo = TRUE)
 ## Generate SES Index using CFA model (SES at enrollment) (Figure 1a)
 ```{r, echo=T, warning=FALSE, message=FALSE}
 rm(list=ls())
+library(car)
+library(circlize)
+library(colorspace)
+library(copiome)
+library(corrplot)
+library(cowplot)
+library(dplyr)
+library(ecodist)
+library(ggcorrplot)
+library(ggforce)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(ggsci)
+library(gtsummary)
+library(lavaan)
+library(limma)
+library(lubridate)
+library(Maaslin2)
+library(magrittr)
+library(metaMint)
+library(missForest)
+library(patchwork)
+library(phyloseq)
+library(plyr)
 library(polycor)
 library(psych)
-library(circlize)
-library(lavaan)
+library(reshape2)
+library(scales)
 library(semTools)
-library(colorspace)
-library(ggplot2)
-library(tibble)
-library(limma)
+library(stringr)
 library(tidyverse)
-library(patchwork)
+library(WGCNA)
+library(xlsx)
 work.dir <- "/Users/darlene.dai/Desktop/SES/Results/manuscript/Code/"
 setwd(work.dir)
 ############################################################################################
@@ -54,32 +77,6 @@ data.withmissing <- merge(data.withmissing, data.ses.mr,by="subjectnumber",all=T
 data.withmissing$income_pre_num <- as.numeric(data.withmissing$income_pre)
 data.withmissing$meducationhighest_pre18w_num <- as.numeric(data.withmissing$meducationhighest_pre18w)
 data.withmissing$deducationhighest_pre18w_num <- as.numeric(data.withmissing$deducationhighest_pre18w)
-
-#Different way of generating ses index - using PCA analysis
-# data.try <- data.withmissing[,c("subjectnumber","income_pre_num","meducationhighest_pre18w_num","deducationhighest_pre18w_num","communityladder_pre18w","canadaladder_pre18w")]
-# data.try <- na.omit(data.try)
-# rownames(data.try) <- data.try$subjectnumber
-# data.try <- data.try[,c("income_pre_num","meducationhighest_pre18w_num","deducationhighest_pre18w_num","communityladder_pre18w","canadaladder_pre18w")]
-# 
-# pca.m <- prcomp(data.try,scale. = T)
-# pca.m$rotation
-# summ <- summary(pca.m)
-# weights <- summ$importance[2,]
-# data.try1 <- data.frame(pc.avg1=apply(pca.m$x[,1,drop=F],1,mean))
-# data.try2 <- data.frame(pc.avg2=apply(pca.m$x[,1:2,drop=F], 1, function(x) sum(x * weights[1:2])))
-# data.try3 <- data.frame(pc.avg3=apply(pca.m$x[,1:3,drop=F], 1, function(x) sum(x * weights[1:3])))
-# data.try5 <-data.frame(pc.avg5=apply(pca.m$x[,1:5,drop=F], 1, function(x) sum(x * weights[1:5])))
-# 
-# data.try <- cbind(data.try1,data.try2,data.try3,data.try5)
-# dd.kk <- merge(data.ses.mr.raw, data.try5,by.x="subjectnumber", by.y="row.names")
-# library(reshape2)
-# library(ggpubr)
-# dd.kk.long <- melt(dd.kk, id.vars=c("subjectnumber","MR1_latent.raw"))
-# ggplot(dd.kk.long, aes(MR1_latent.raw,value))+
-#   geom_point()+
-#   facet_wrap(~variable,scale="free")+stat_cor(method="pearson")
-# data.withmissing <- merge(data.withmissing, data.try5, by.x="subjectnumber", by.y="row.names",all.x=T)
-
 ```
 
 ## Generate SES Index at 1 year using CFA model (assocaited with SES index at enrollment correlation=0.86)
@@ -197,20 +194,7 @@ used.vars <- c("asthma5y_ep","atopy5y","Tscore_abnormal","overweight",
                "MR1_latent.raw","meducationhighest_pre18w","deducationhighest_pre18w","income_pre", "canadaladder_pre18w", "communityladder_pre18w",
                 "MR1_latent.raw.1y","income_1y" ,"meducationhighest_1y","deducationhighest_1y", "canadaladder_1y", "communityladder_1y",
                "race_dad","race_mom","site","male")
-# ,
-#               "bfhistory_m","bfhistory_m_time",
-#                                   "bfhistory_f","bfhistory_f_time",
-#                "PBscore",
-#                                     "WSscore",
-#                                     "BAscore","eaPBscore",
-#                                     "eaWSscore" ,                   
-#                                     "eaBAscore",
-#                                     "pb_sumscore",
-#                                     "ws_sumscore",
-#                                     "ba_sumscore"  ,                
-#                                     "eapb_sumscore",
-#                                     "eaws_sumscore",
-#                                     "eaba_sumscore")
+
 used.vars.demo <- used.vars
 #Dictionary for demographic table and forest plot
 level.dictionary <- c("2.cwl" = "C-section with labor",
@@ -270,8 +254,7 @@ demo.tab1.use <- demo.tab1.use[order(demo.tab1.use$Category),c("Variable","Cohor
 demo.tab1.use
 ```
 
-
-
+### Generate Tree diagram of Item Cluster analysis (ICLUST) (Figure S1b)
 ```{r, warning=FALSE, results = 'hide', message=FALSE}
 #Load in the package and function and data
 data.use <- data.withmissing
@@ -310,7 +293,6 @@ iclust(X)
 dev.off()
 ```
 
-### Generate Tree diagram of Item Cluster analysis (ICLUST) (Figure S1b)
 ```{r, echo=T,out.width="120%"}
 iclust(X)
 ```
@@ -681,7 +663,7 @@ dev.off()
 ```
 
 
-### Generate sensitivity analyses of SES vs. early-life factors (Figure S1C) 
+### Generate sensitivity analyses of SES vs. early-life factors (Figure S1c) 
 ```{r, echo=T,out.width="160%", warning=F, message=F}
 #Get the order in the plot
 ff.order <- c(layer_scales(ses.plot, 1, 1)$x$range$range,
@@ -740,7 +722,7 @@ plot(sens.plot.fig)
 dev.off()
 ```
 
-### Generate phenotypes vs. early-life factors  (Figure 1D) 
+### Generate phenotypes vs. early-life factors  (Figure 1d) 
 ```{r, echo=T,out.width="160%", warning=F, message=F}
 #################################################################################################################
 #Plot for phenotype and exposomes
@@ -905,7 +887,7 @@ p_left + p_mid + p_right + plot_layout(design = layout)
 dev.off()
 ```
 
-### Generate SES index + BF vs. phenotype (Fig 3C)
+### Generate SES index + BF vs. phenotype (Fig 3c)
 ```{r, echo=T, out.width="120%", warning=F, message=F}
 
 response.plot <- subset(Response.outcome, Cov=="SES_EBFcompound" & Cohort=="all")
@@ -1057,33 +1039,6 @@ dev.off()
 
 ## Run PERMANOVA analysis (Figure 2, 3)
 ```{r, echo=T, warning=FALSE, message=FALSE}
-rm(list=ls())
-library(phyloseq)
-library(psych)
-library(corrplot)
-library("psych")
-library(ggplot2)
-library(car)
-library(magrittr)
-library(ggcorrplot)
-library(missForest)
-library(xlsx)
-library(ggpubr)
-library(lavaan)
-library(limma)
-library(metaMint)
-library(lubridate)
-library(plyr)
-library(stringr)
-library(dplyr)
-library(cowplot)
-library(ggrepel)
-library(ecodist)
-library(reshape2)
-# work.dir <- "~/Documents/SES_Manuscript/"
-work.dir <- "/Users/darlene.dai/Desktop/SES/Results/manuscript/Code/"
-
-setwd(work.dir)
 load("Results/P1 Processed Metagenomic data.RData")
 
 #No need to run again
@@ -1252,7 +1207,7 @@ load("Results/P3 PCOA data.RData")
 load("Results/P5 Maaslin2 Results.RData")
 ```
 
-## Create alpha diversity across SES (Figure 2A,B, Figure S2A,B)
+## Create alpha diversity across SES (Figure 2a,b, Figure S2a,b)
 ```{r, echo=T, warning=FALSE, message=FALSE}
 ###############################################
 data.raw <- data.withmissing
@@ -1466,8 +1421,7 @@ dev.off()
 ```
 
 
-
-## Create PERMANOVA analysis results (Figure 2C)
+## Create PERMANOVA analysis results (Figure 2c)
 ```{r, echo=T, warning=FALSE, message=FALSE}
 data.map.use <- data.map
 PERMANOVA.all <- subset(PERMANOVA.UVA, Var%in%cov.vars[!cov.vars%in%"EBF_6m"])
@@ -1536,7 +1490,7 @@ dev.off()
 
 ```
 
-### Generate PCoA figure (Figure 2D)
+### Generate PCoA figure (Figure 2d)
 ```{r, echo=T, warning=FALSE, message=FALSE, out.width="200%"}
 
 
@@ -1780,11 +1734,9 @@ pcoaVS.sp.1y$values[3]/sum(pcoaVS.sp.1y$values)
 
 ```
 
-### Generate SEM model for SES affect PCOAs through early-life factors (Figure 2E)
+### Generate SEM model for SES affect PCOAs through early-life factors (Figure 2e)
 ```{r, echo=T, warning=FALSE, message=FALSE}
-# rm(list=ls())
-# work.dir <- "/Users/darlene.dai/Desktop/SES/Results/manuscript/Code/"
-# setwd(work.dir)
+# No need to rerun again
 # load("Results/P0 Clinical data with SES Index.RData")
 # load("Results/P1 Processed Metagenomic data.RData")
 # load("Results/P3 PCOA data.RData")
@@ -1968,7 +1920,7 @@ kk[kk$rhs=="MR1_latent.raw" & kk$pvalue<0.05,c("lhs","std.all","pvalue")]
 summary(model.all.final, fit=T)
 ```
 
-### Generate dispersion boxplot (Figure 3A)
+### Generate dispersion boxplot (Figure 3a)
 ```{r, echo=T, warning=FALSE, message=FALSE}
 pdf("Figures/Dispersion figure.pdf",width=3,height=10)
 data.withmissing.bf <- merge(data.withmissing,subset(data.div, Visit=="3 month"),by.x="subjectnumber", by.y="SubjectNumber")
@@ -2012,30 +1964,9 @@ p
 ```
 
 
-### Generate bootstrap PERMANOVA results (Figure 3B)
+### Generate bootstrap PERMANOVA results (Figure 3b)
 ```{r, echo=T, warning=FALSE, message=FALSE}
-# rm(list=ls())
-# library(phyloseq)
-# library(psych)
-# library(corrplot)
-# library("psych")
-# library(ggplot2)
-# library(car)
-# library(magrittr)
-# library(ggcorrplot)
-# library(missForest)
-# library(xlsx)
-# library(WGCNA)
-# library(ggpubr)
-# library(lavaan)
-# library(limma)
-# library(metaMint)
-# library(lubridate)
-# source("/Users/darlene.dai/Desktop/Darlene Dai/Common function/UVA&MVA function.R")
-# source("/Users/darlene.dai/Desktop/Darlene Dai/Common function/Demographic Function.R")
-# 
-# work.dir <- "/Users/darlene.dai/Desktop/SES/Results/manuscript/Code/"
-# setwd(work.dir)
+# No need to rerun again
 # load("Results/P1 Processed Metagenomic data.RData")
 # load("Results/P2 Univariate Analysis of SES.Rdata")
 # 
@@ -2212,46 +2143,8 @@ dev.off()
 ## Run Maaslin2 analysis (Figure 4, 5)
 ## Identify the species associated with SES
 ```{r, echo=T, warning=FALSE, message=FALSE}
-rm(list=ls())
-library(phyloseq)
-library(psych)
-library(corrplot)
-library("psych")
-library(ggplot2)
-library(car)
-library(magrittr)
-library(ggcorrplot)
-library(missForest)
-library(xlsx)
-library(WGCNA)
-library(ggpubr)
-library(lavaan)
-library(limma)
-library(metaMint)
-library(lubridate)
-library(Maaslin2)
-library(tidyverse)
-library(phyloseq)
-library(copiome)
-library(ggpubr)
-library(ggforce)
-library(patchwork)
-library(gtsummary)
-library(Maaslin2)
-library(scales)
-library("ggsci")
-library(dplyr)
-library(cowplot)
-library(plyr)
-library(reshape2)
-library(colorspace)
-work.dir <- "/Users/darlene.dai/Desktop/SES/Results/manuscript/Code/"
-# work.dir <- "~/Documents/SES_Manuscript/"
-setwd(work.dir)
 #####################################################################
 load("Results/P1 Processed Metagenomic data.RData")
-
-
 # Maaslin2 analysis (no need to run again)
 #Remove the samples not prevalent enough
 remove_rare <- function( table , cutoff_pro ) {
@@ -2708,8 +2601,7 @@ sig.sp.ses <- unique(ses.sp.long$feature)
 save(sig.sp.ses, file="Results/P5 Maaslin2 sig ses species mclr.RData")
 ```
 
-
-### Generate figure of species assocaited with SES (Figure S3A)
+### Generate figure of species assocaited with SES (Figure S3a)
 ```{r, echo=T,out.width="120%"}
 plot(ses.plot)
 ```
@@ -2856,7 +2748,7 @@ plot(gg3)
 dev.off()
 ```
 
-### Generate bubble figure to compare the effect of BF and SES (Figure 4B)
+### Generate bubble figure to compare the effect of BF and SES (Figure 4b)
 ```{r, echo=T,out.width="50%"}
 ######################################################################
 #Longitudinal analysis results for SES & BF narrow down to focus - Bubble plot
@@ -2921,7 +2813,7 @@ plot(sesbf.p)
 dev.off()
 ```
 
-### Generate heatmap of associaiton between early-life factors and microbiome (Figure S3B)
+### Generate heatmap of associaiton between early-life factors and microbiome (Figure S3b)
 ```{r, echo=T,out.width="120%"}
 ######################################################################
 #Supplementary figure
@@ -3177,7 +3069,7 @@ save(ss.binfantis, file="Results/subjects with Binfantis.RData")
 
 ```
 
-## bf history vs. B.infantis (Figure S5, Figure 5F)
+## bf history vs. B.infantis (Figure S5, Figure 5f)
 ```{r, echo=T,out.width="120%", message=FALSE,warning=F}
 #Breastfeeding history vs. B. infantis prevalence
 data.withmissing$Binfantis.pre <- ifelse(data.withmissing$subjectnumber%in%ss.binfantis, 1,
@@ -3279,38 +3171,10 @@ pdf("Figures/Binfantis factors.pdf",height=6, width=12)
 dev.off()
 
 ```
-## SEM model for SES -> Microbiome -> phenotype (Figure 5A)
+
+## SEM model for SES -> Microbiome -> phenotype (Figure 5a)
 ```{r, echo=T,out.width="120%", message=FALSE}
-# rm(list=ls())
-# library(phyloseq)
-# library(psych)
-# library(corrplot)
-# library("psych")
-# library(ggplot2)
-# library(car)
-# library(magrittr)
-# library(ggcorrplot)
-# library(missForest)
-# library(xlsx)
-# library(WGCNA)
-# library(ggpubr)
-# library(lavaan)
-# library(limma)
-# library(metaMint)
-# library(lubridate)
-# library(Maaslin2)
-# library(tidyverse)
-# library(phyloseq)
-# library(copiome)
-# library(ggpubr)
-# library(ggforce)
-# library(patchwork)
-# library(gtsummary)
-# library(Maaslin2)
-# library(plyr)
-# library(ecodist)
-# work.dir <- "/Users/darlene.dai/Desktop/SES/Results/manuscript/Code/"
-# setwd(work.dir)
+# No need to rerun again
 # load("/Users/darlene.dai/Desktop/SES/P0 Imputed data for factor analysis.RData")
 # load("Results/P0 Clinical data with SES Index.RData")
 # load("Results/P1 Processed Metagenomic data.RData")
@@ -3400,64 +3264,12 @@ dev.off()
 #                  missing="pairwise")
 # 
 # 
-# ########################################################################################################################################################################
-# model.serial.overweight <- sem(paste(c(c(mm.latent, m.ses, m.main[1], m.test[1:2]),adj.M.use.final),sep="\n"),
-#                                data=data.sem.use,
-#                                ordered=c(resp.check.vars),
-#                                missing="pairwise")
-# 
-# model.serial.asthma <- sem(paste(c(c(mm.latent, m.ses, m.main[2], m.test[3:4]),adj.M.use.final),sep="\n"),
-#                            data=data.sem.use,
-#                            ordered=c(resp.check.vars),
-#                            missing="pairwise")
-# 
-# model.serial.abnor <- sem(paste(c(c(mm.latent, m.ses, m.main[3], m.test[5:6]),adj.M.use.final),sep="\n"),
-#                           data=data.sem.use,
-#                           ordered=c(resp.check.vars),
-#                           missing="pairwise")
-# 
-# model.serial.atopy <- sem(paste(c(c(mm.latent, m.ses, m.main[4], m.test[7:8]),adj.M.use.final),sep="\n"),
-#                           data=data.sem.use,
-#                           ordered=c(resp.check.vars),
-#                           missing="pairwise")
-# 
-# ########################################################################################################################################################################
-# model.serial.overweight.lw <- sem(paste(c(c(mm.latent, m.ses, m.main[1], m.test[1:2]),adj.M.use.final),sep="\n"),
-#                                data=data.sem.use,
-#                                ordered=c(resp.check.vars))
-# 
-# model.serial.asthma.lw <- sem(paste(c(c(mm.latent, m.ses, m.main[2], m.test[3:4]),adj.M.use.final),sep="\n"),
-#                            data=data.sem.use,
-#                            ordered=c(resp.check.vars))
-# 
-# model.serial.abnor.lw <- sem(paste(c(c(mm.latent, m.ses, m.main[3], m.test[5:6]),adj.M.use.final),sep="\n"),
-#                           data=data.sem.use,
-#                           ordered=c(resp.check.vars))
-# 
-# model.serial.atopy.lw <- sem(paste(c(c(mm.latent, m.ses, m.main[4], m.test[7:8]),adj.M.use.final),sep="\n"),
-#                           data=data.sem.use,
-#                           ordered=c(resp.check.vars))
 # 
 # save(model.all, adj.M.use.final,
-#      model.serial.overweight, model.serial.asthma,
-#      model.serial.abnor, model.serial.atopy,
-#      model.serial.overweight.lw, model.serial.asthma.lw,
-#      model.serial.abnor.lw, model.serial.atopy.lw,
 #      file="Results/SES_M_phenotype_sem_final_seperate.RData")
-# summary(model.all,fit=T,standardized=T)
-# summary(model.serial.overweight,fit=T,standardized=T)
-# summary(model.serial.asthma,fit=T,standardized=T)
-# summary(model.serial.abnor,fit=T,standardized=T)
-# summary(model.serial.atopy,fit=T,standardized=T)
-# 
-# summary(model.serial.overweight.lw,fit=T,standardized=T)
-# summary(model.serial.asthma.lw,fit=T,standardized=T)
-# summary(model.serial.abnor.lw,fit=T,standardized=T)
-# summary(model.serial.atopy.lw,fit=T,standardized=T)
 
 load("Results/SES_M_phenotype_sem_final_seperate.RData")
-summary(model.all,fit=T,standardized=T)
-
+summary(model.all, fit=T)
 ```
 ##Get the features associated with metacyc pathways
 ```{r, warning=FALSE, results = 'hide', message=FALSE}
@@ -3503,7 +3315,7 @@ SES.masslin.all.use <- subset(SES.masslin.all, Normalization=="MCLR" & BFsub=="A
 
 ```
 
-### Generate bubble figure of pathways to compare the effect of BF and SES (Figure S3C)
+### Generate bubble figure of pathways to compare the effect of BF and SES (Figure S3c)
 ```{r, echo=T,out.width="50%", message=FALSE}
 ######################################################################
 #Longitudinal analysis results for SES & BF narrow down to focus - Bubble plot
